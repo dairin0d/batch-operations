@@ -53,6 +53,7 @@ class BlEnums:
     object_types = {item.identifier for item in bpy.types.Object.bl_rna.properties["type"].enum_items}
     object_types_editable = {'MESH', 'CURVE', 'SURFACE', 'META', 'FONT', 'ARMATURE', 'LATTICE'}
     object_types_geometry = {'MESH', 'CURVE', 'SURFACE', 'META', 'FONT'}
+    object_types_with_modifiers = {'MESH', 'CURVE', 'SURFACE', 'FONT', 'LATTICE'}
     
     object_mode_support = {
         'MESH':{'OBJECT', 'EDIT', 'SCULPT', 'VERTEX_PAINT', 'WEIGHT_PAINT', 'TEXTURE_PAINT', 'PARTICLE_EDIT',
@@ -802,7 +803,7 @@ PrimitiveItem = [
     ("Int", "Int", dict()),
     ("Float", "Float", dict()),
     ("String", "String", dict()),
-    ("Color", "FloatVector", dict(subtype='COLOR', size=3)),
+    ("Color", "FloatVector", dict(subtype='COLOR', size=3, min=0.0, max=1.0)),
     ("Euler", "FloatVector", dict(subtype='EULER', size=3)),
     ("Quaternion", "FloatVector", dict(subtype='QUATERNION', size=4)),
     ("Matrix3", "FloatVector", dict(subtype='MATRIX', size=9)),

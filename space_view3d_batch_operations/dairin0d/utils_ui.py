@@ -501,7 +501,7 @@ def ui_contexts_under_coord(x, y):
             for region in area.regions:
                 if point_in_rect(point, region):
                     yield dict(window=window, screen=screen,
-                        area=area, region=region, space_data=space_data,
+                        area=area, space_data=space_data, region=region,
                         region_data=rv3d_from_region(area, region))
             break
 
@@ -511,6 +511,18 @@ def ui_context_under_coord(x, y, index=0):
         if i == index:
             return ui_context
     return ui_context
+
+def find_ui_area(area_type, region_type='WINDOW'):
+    window = bpy.context.window
+    screen = window.screen
+    for area in screen.areas:
+        if area.type == area_type:
+            space_data = area.spaces.active
+            for region in area.regions:
+                if region.type == region_type: break
+            return dict(window=window, screen=screen,
+                area=area, space_data=space_data, region=region,
+                region_data=rv3d_from_region(area, region))
 
 # TODO: relative coords?
 def convert_ui_coord(window, area, region, xy, src, dst, vector=True):

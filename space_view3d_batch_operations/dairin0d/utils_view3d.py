@@ -665,7 +665,8 @@ class SmartView3D:
         is_object_selection = (mode == 'OBJECT') or (mode in BlEnums.paint_sculpt_modes)
         
         if select_mode:
-            prev_select_mode = tool_settings.mesh_select_mode
+            # IMPORTANT: make sure it's a copy, or we will be basically assigning itself to iself
+            prev_select_mode = tuple(tool_settings.mesh_select_mode)
             tool_settings.mesh_select_mode = ('VERT' in select_mode, 'EDGE' in select_mode, 'FACE' in select_mode)
         
         if obj_too:

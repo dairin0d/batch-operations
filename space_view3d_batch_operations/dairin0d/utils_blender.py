@@ -19,6 +19,8 @@ import bpy
 
 import bmesh
 
+import time
+
 from .bpy_inspect import BlEnums
 
 # ========================== TOGGLE OBJECT MODE ============================ #
@@ -53,7 +55,6 @@ class ToggleObjectMode:
 
 # =============================== MESH CACHE =============================== #
 #============================================================================#
-
 class MeshCacheItem:
     def __init__(self):
         self.variants = {}
@@ -348,8 +349,7 @@ class Selection:
         walker = self.walk()
         next(walker, None) # skip active item
         for item in walker:
-            if item[1]:
-                yield item
+            if item[1]: yield item
     
     def __bool__(self):
         """Returns True if there is at least 1 element selected"""
@@ -906,3 +906,223 @@ class SelectionSnapshot:
     
     def __exit__(self, type, value, traceback):
         self.restore()
+
+# ============================ CHANGE MONITOR ============================== #
+#============================================================================#
+class ChangeMonitor:
+    reports_cleanup_trigger = 512
+    reports_cleanup_count = 128
+    max_evaluation_time = 0.01
+    
+    def __init__(self, context=None, update=True, **kwargs):
+        if not context: context = bpy.context
+        wm = context.window_manager
+        
+        self.selection = Selection(container=frozenset)
+        
+        self.active_obj = None
+        self.selection_walker = None
+        self.selection_recorded = False
+        self.selection_recorder = []
+        self.selection_record_id = 0
+        self.scene_hash = 0
+        self.undo_hash = 0
+        self.operators_len = 0
+        self.reports = []
+        self.reports_len = 0
+        
+        if update: self.update(context, **kwargs)
+        
+        self.active_obj_changed = False
+        self.selection_changed = False
+        self.scene_changed = False
+        self.undo_performed = False
+        self.object_updated = False
+        self.operators_changed = 0
+        self.reports_changed = 0
+    
+    def get_reports(self, context=None, **kwargs):
+        if not context: context = bpy.context
+        wm = context.window_manager
+        
+        area = kwargs.get("area") or context.area
+        
+        try:
+            prev_clipboard = wm.clipboard
+        except UnicodeDecodeError as exc:
+            #print(exc)
+            prev_clipboard = ""
+        
+        prev_type = area.type
+        if prev_type != 'INFO':
+            area.type = 'INFO'
+        
+        try:
+            bpy.ops.info.report_copy(kwargs)
+            if wm.clipboard: # something was selected
+                bpy.ops.info.select_all_toggle(kwargs) # something is selected: deselect all
+            bpy.ops.info.select_all_toggle(kwargs) # nothing is selected: select all
+            
+            bpy.ops.info.report_copy(kwargs)
+            reports = wm.clipboard.splitlines()
+            
+            bpy.ops.info.select_all_toggle(kwargs) # deselect everything
+            
+            if len(reports) >= self.reports_cleanup_trigger:
+                for i in range(self.reports_cleanup_count):
+                    bpy.ops.info.select_pick(kwargs, report_index=i)
+                bpy.ops.info.report_delete(kwargs)
+        except Exception as exc:
+            #print(exc)
+            reports = []
+        
+        if prev_type != 'INFO':
+            area.type = prev_type
+        
+        wm.clipboard = prev_clipboard
+        
+        return reports
+    
+    something_changed = property(lambda self:
+        self.active_obj_changed or
+        self.selection_changed or
+        self.scene_changed or
+        self.undo_performed or
+        self.object_updated or
+        bool(self.operators_changed) or
+        bool(self.reports_changed)
+    )
+    
+    def hash(self, obj):
+        if obj is None: return 0
+        if hasattr(obj, "as_pointer"): return obj.as_pointer()
+        return hash(obj)
+    
+    def update(self, context=None, **kwargs):
+        if not context: context = bpy.context
+        wm = context.window_manager
+        
+        self.active_obj_changed = False
+        self.selection_changed = False
+        self.scene_changed = False
+        self.undo_performed = False
+        self.object_updated = False
+        self.operators_changed = 0
+        self.reports_changed = 0
+        
+        active_obj = kwargs.get("object") or context.object
+        scene = kwargs.get("scene") or context.scene
+        
+        if (self.active_obj != active_obj):
+            self.active_obj = active_obj
+            self.active_obj_changed = True
+        
+        scene_hash = self.hash(scene)
+        if (self.scene_hash != scene_hash):
+            self.scene_hash = scene_hash
+            self.scene_changed = True
+        
+        undo_hash = self.hash(bpy.data)
+        if (self.undo_hash != undo_hash):
+            self.undo_hash = undo_hash
+            self.undo_performed = True
+        
+        if active_obj and ('EDIT' in active_obj.mode):
+            if active_obj.is_updated or active_obj.is_updated_data:
+                self.object_updated = True
+            data = active_obj.data
+            if data and (data.is_updated or data.is_updated_data):
+                self.object_updated = True
+        
+        operators_len = len(wm.operators)
+        if (operators_len != self.operators_len):
+            self.operators_changed = operators_len - self.operators_len
+            self.operators_len = operators_len
+        else: # maybe this would be a bit safer?
+            reports = self.get_reports(context, **kwargs) # sometimes this causes Blender to crash
+            reports_len = len(reports)
+            if (reports_len != self.reports_len):
+                self.reports_changed = reports_len - self.reports_len
+                self.reports = reports
+                self.reports_len = reports_len
+        
+        self.analyze_selection()
+    
+    def reset_selection(self):
+        self.selection.bmesh = None
+        self.selection_walker = None
+        self.selection_recorded = False
+        self.selection_recorder = []
+        self.selection_record_id = 0
+    
+    def analyze_selection(self):
+        reset_selection = self.active_obj_changed
+        reset_selection |= self.scene_changed
+        reset_selection |= self.undo_performed
+        reset_selection |= self.object_updated
+        reset_selection |= self.operators_changed
+        reset_selection |= self.reports_changed
+        if reset_selection:
+            #print("Selection reseted for external reasons")
+            self.reset_selection()
+            # At this point we have no idea if the selection
+            # has actually changed. This is more of a warning
+            # about a potential change of selection.
+            self.selection_changed = True
+        
+        if self.selection_walker is None:
+            self.selection_walker = self.selection.walk()
+        
+        if self.selection_recorded:
+            time_stop = time.clock() + self.max_evaluation_time
+            
+            if self.selection_record_id == 0:
+                item = next(self.selection_walker, None)
+                history, active, total = item
+                item = tuple(self.hash(h) for h in history), self.hash(active), total
+                self.selection_record_id = 1
+                if self.selection_recorder[0] != item:
+                    #print("Active/history/total changed")
+                    self.selection_changed = True
+                    self.reset_selection()
+                    return
+            
+            recorded_count = len(self.selection_recorder)
+            for item in self.selection_walker:
+                if item[1]:
+                    item = self.hash(item[0]), item[1]
+                    i = self.selection_record_id
+                    if (i >= recorded_count) or (self.selection_recorder[i] != item):
+                        #print("More than necessary or selection changed")
+                        self.selection_changed = True
+                        self.reset_selection()
+                        return
+                    self.selection_record_id = i + 1
+                if time.clock() > time_stop: break
+            else: # the iterator is exhausted
+                if self.selection_record_id < recorded_count:
+                    #print("Less than necessary")
+                    self.selection_changed = True
+                    self.reset_selection()
+                    return
+                self.selection_walker = None
+                self.selection_record_id = 0
+        else:
+            time_stop = time.clock() + self.max_evaluation_time
+            
+            if self.selection_record_id == 0:
+                item = next(self.selection_walker, None)
+                history, active, total = item
+                item = tuple(self.hash(h) for h in history), self.hash(active), total
+                self.selection_record_id = 1
+                self.selection_recorder.append(item) # first item is special
+            
+            for item in self.selection_walker:
+                if item[1]:
+                    item = self.hash(item[0]), item[1]
+                    self.selection_recorder.append(item)
+                if time.clock() > time_stop: break
+            else: # the iterator is exhausted
+                self.selection_walker = None
+                self.selection_recorded = True
+                self.selection_record_id = 0

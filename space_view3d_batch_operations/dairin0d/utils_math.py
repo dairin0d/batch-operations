@@ -19,6 +19,19 @@ from mathutils import Color, Vector, Matrix, Quaternion, Euler
 
 import math
 
+# Newton's binomial coefficients / Pascal's triangle coefficients / n choose k / nCk
+# https://stackoverflow.com/questions/26560726/python-binomial-coefficient
+# https://stackoverflow.com/questions/3025162/statistics-combinations-in-python
+def binomial(n, k): # A fast way to calculate binomial coefficients by Andrew Dalke
+    if not (0 <= k <= n): return 0
+    ntok = 1
+    ktok = 1
+    for t in range(1, min(k, n - k) + 1):
+        ntok *= n
+        ktok *= t
+        n -= 1
+    return ntok // ktok
+
 def lerp(v0, v1, t):
     return v0 * (1.0 - t) + v1 * t
 

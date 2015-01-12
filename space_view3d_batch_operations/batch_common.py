@@ -35,10 +35,22 @@ from {0}dairin0d.utils_view3d import SmartView3D
 from {0}dairin0d.utils_userinput import KeyMapUtils
 from {0}dairin0d.utils_ui import NestedLayout
 from {0}dairin0d.bpy_inspect import prop, BlRna
+from {0}dairin0d.utils_blender import ChangeMonitor
 from {0}dairin0d.utils_addon import AddonManager
 """.format(dairin0d_location))
 
 addon = AddonManager()
+
+idnames_separator = "\t"
+
+def round_to_bool(v):
+    return (v > 0.5) # bool(round(v))
+
+def has_common_layers(obj, scene):
+    return any(l0 and l1 for l0, l1 in zip(obj.layers, scene.layers))
+
+def is_visible(obj, scene):
+    return (not obj.hide) and has_common_layers(obj, scene)
 
 # adapted from the Copy Attributes Menu addon
 def copyattrs(src, dst, filter=""):
@@ -98,58 +110,28 @@ class Pick_Base:
             return ({'FINISHED'} if confirm else {'CANCELLED'})
         return {'RUNNING_MODAL'}
 
-class TemplateLeft:
-    bl_region_type = 'TOOLS'
-    @classmethod
-    def poll(cls, context):
-        return addon.preferences.use_panel_left
-
-class TemplateRight:
-    bl_region_type = 'UI'
-    @classmethod
-    def poll(cls, context):
-        return addon.preferences.use_panel_right
-
 def LeftRightPanel(panel_class):
-    @addon.Panel
-    class LeftPanel(panel_class, TemplateLeft):
-        bl_idname = panel_class.__name__ + "_left"
+    name = panel_class.__name__
+    poll = getattr(panel_class, "poll", None)
+    if poll:
+        poll_left = classmethod(lambda cls, context: addon.preferences.use_panel_left and poll(cls, context))
+        poll_right = classmethod(lambda cls, context: addon.preferences.use_panel_right and poll(cls, context))
+    else:
+        poll_left = classmethod(lambda cls, context: addon.preferences.use_panel_left)
+        poll_right = classmethod(lambda cls, context: addon.preferences.use_panel_right)
     
     @addon.Panel
-    class RightPanel(panel_class, TemplateRight):
-        bl_idname = panel_class.__name__ + "_right"
+    class LeftPanel(panel_class):
+        bl_idname = name + "_left"
+        bl_region_type = 'TOOLS'
+        poll = poll_left
+    
+    @addon.Panel
+    class RightPanel(panel_class):
+        bl_idname = name + "_right"
+        bl_region_type = 'UI'
+        poll = poll_right
     
     return panel_class
 
-# ============================== AUTOREFRESH =============================== #
-#============================================================================#
-@addon.Operator(idname="object.batch_refresh")
-def batch_refresh(self, context):
-    """Force batch UI refresh"""
-    addon.external.modifiers.refresh(context, True)
-
-@addon.PropertyGroup
-class AutorefreshPG:
-    autorefresh = True | prop("Enable auto-refresh")
-    refresh_interval = 0.5 | prop("Auto-refresh Interval", name="Refresh Interval", min=0.0)
-
-@LeftRightPanel
-class VIEW3D_PT_batch_autorefresh:
-    bl_category = "Batch"
-    bl_context = "objectmode"
-    bl_label = "Batch Refresh"
-    bl_space_type = 'VIEW_3D'
-    
-    def draw(self, context):
-        layout = NestedLayout(self.layout)
-        batch_autorefresh = addon.preferences.autorefresh
-        
-        with layout.row():
-            with layout.row(True):
-                layout.prop(batch_autorefresh, "autorefresh", text="", icon='PREVIEW_RANGE', toggle=True)
-                layout.row(True)(active=batch_autorefresh.autorefresh).prop(batch_autorefresh, "refresh_interval", text="Interval", icon='PREVIEW_RANGE')
-            layout.operator("object.batch_refresh", text="", icon='FILE_REFRESH')
-
-addon.Preferences.autorefresh = AutorefreshPG | prop()
-#============================================================================#
-
+change_monitor = ChangeMonitor(update=False)

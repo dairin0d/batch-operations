@@ -562,6 +562,8 @@ class AddonManager:
         
         deps = {}
         
+        extra_classes = set()
+        
         # Extract dependent properties
         for cls in self.classes:
             for key, info in BpyProp.iterate(cls):
@@ -578,17 +580,28 @@ class AddonManager:
                         info["update"] = getattr(cls, update)
                 
                 # Extract dependent properties
-                if (info.type in refs) and (info["type"] in self.classes):
-                    # This property can actually reside in one of the
-                    # base classes, so we need to search the MRO
-                    for _cls in type.mro(cls):
-                        if BpyProp.validate(_cls.__dict__.get(key)):
-                            dep_key = (_cls, key)
-                            if dep_key not in deps:
-                                deps[dep_key] = info()
-                            # If some properties are overriden,
-                            # we can't skip the ancestor classes!
-                            #break
+                if info.type in refs:
+                    pg = info["type"]
+                    
+                    is_foreign = (pg not in self.classes)
+                    
+                    if is_foreign and pg.__name__.endswith(":AUTOREGISTER"):
+                        extra_classes.add(pg)
+                        is_foreign = False
+                    
+                    if not is_foreign:
+                        # This property can actually reside in one of the
+                        # base classes, so we need to search the MRO
+                        for _cls in type.mro(cls):
+                            if BpyProp.validate(_cls.__dict__.get(key)):
+                                dep_key = (_cls, key)
+                                if dep_key not in deps:
+                                    deps[dep_key] = info()
+                                # If some properties are overriden,
+                                # we can't skip the ancestor classes!
+                                #break
+        
+        self.classes.extend(extra_classes)
         
         # Temporarily remove properties...
         for dep_key in deps.keys():
@@ -1098,7 +1111,7 @@ def {0}({1}):
         resmap=_Operator_resmap, stopped_code="return {'CANCELLED'}"),
         dict(name="invoke", args=("self", "context", "event"), func_init=True, gen_init=True,
         resmap=_Operator_resmap, stopped_code="return {'CANCELLED'}",
-        extra_code="if _result == {'RUNNING_MODAL'}: context.window_manager.modal_handler_add(self)"),
+        extra_code="if 'RUNNING_MODAL' in _result: context.window_manager.modal_handler_add(self)"),
         dict(name="modal", args=("self", "context", "event"), func_init=False, gen_init=False,
         resmap=_Operator_resmap, stopped_code="return {'CANCELLED'}"),
     ]
