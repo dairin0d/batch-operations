@@ -180,6 +180,56 @@ class BlEnums:
     types_data = {v:k for k, v in data_types.items()}
     
     icons = list(bpy.types.UILayout.bl_rna.functions['prop'].parameters['icon'].enum_items.keys())
+    
+    modifier_icons = {
+        'MESH_CACHE':'MOD_MESHDEFORM',
+        'UV_PROJECT':'MOD_UVPROJECT',
+        'UV_WARP':'MOD_UVPROJECT',
+        'VERTEX_WEIGHT_EDIT':'MOD_VERTEX_WEIGHT',
+        'VERTEX_WEIGHT_MIX':'MOD_VERTEX_WEIGHT',
+        'VERTEX_WEIGHT_PROXIMITY':'MOD_VERTEX_WEIGHT',
+        'ARRAY':'MOD_ARRAY',
+        'BEVEL':'MOD_BEVEL',
+        'BOOLEAN':'MOD_BOOLEAN',
+        'BUILD':'MOD_BUILD',
+        'DECIMATE':'MOD_DECIM',
+        'EDGE_SPLIT':'MOD_EDGESPLIT',
+        'MASK':'MOD_MASK',
+        'MIRROR':'MOD_MIRROR',
+        'MULTIRES':'MOD_MULTIRES',
+        'REMESH':'MOD_REMESH',
+        'SCREW':'MOD_SCREW',
+        'SKIN':'MOD_SKIN',
+        'SOLIDIFY':'MOD_SOLIDIFY',
+        'SUBSURF':'MOD_SUBSURF',
+        'TRIANGULATE':'MOD_TRIANGULATE',
+        'WIREFRAME':'MOD_WIREFRAME',
+        'ARMATURE':'MOD_ARMATURE',
+        'CAST':'MOD_CAST',
+        'CURVE':'MOD_CURVE',
+        'DISPLACE':'MOD_DISPLACE',
+        'HOOK':'HOOK',
+        'LAPLACIANSMOOTH':'MOD_SMOOTH',
+        'LAPLACIANDEFORM':'MOD_MESHDEFORM',
+        'LATTICE':'MOD_LATTICE',
+        'MESH_DEFORM':'MOD_MESHDEFORM',
+        'SHRINKWRAP':'MOD_SHRINKWRAP',
+        'SIMPLE_DEFORM':'MOD_SIMPLEDEFORM',
+        'SMOOTH':'MOD_SMOOTH',
+        'WARP':'MOD_WARP',
+        'WAVE':'MOD_WAVE',
+        'CLOTH':'MOD_CLOTH',
+        'COLLISION':'MOD_PHYSICS',
+        'DYNAMIC_PAINT':'MOD_DYNAMICPAINT',
+        'EXPLODE':'MOD_EXPLODE',
+        'FLUID_SIMULATION':'MOD_FLUIDSIM',
+        'OCEAN':'MOD_OCEAN',
+        'PARTICLE_INSTANCE':'MOD_PARTICLES',
+        'PARTICLE_SYSTEM':'MOD_PARTICLES',
+        'SMOKE':'MOD_SMOKE',
+        'SOFT_BODY':'MOD_SOFT',
+        'SURFACE':'MODIFIER',
+    }
 
 #============================================================================#
 
@@ -939,6 +989,8 @@ class prop:
     }
     
     def parse_arguments(self, value, kwargs):
+        if value is None: value = kwargs.get("default")
+        
         value_target = "default"
         vtype = type(value)
         

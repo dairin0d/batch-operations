@@ -1070,20 +1070,15 @@ def {0}({1}):
         modes = None
         
         if kwargs:
-            #if "tip" in kwargs:
-            #    kwargs["description"] = kwargs.pop("tip")
-            
             # Add attributes mentioned in the decorator
             for key, value in kwargs.items():
                 name = "bl_" + key
                 if key == "mode":
                     modes = self._normalize("mode", value, BlEnums.modes)
                 elif name in BlEnums.common_attrs:
-                    if not hasattr(cls, name):
-                        setattr(cls, name, value)
+                    if not hasattr(cls, name): setattr(cls, name, value)
                 elif key in BlEnums.common_attrs:
-                    if not hasattr(cls, key):
-                        setattr(cls, key, value)
+                    if not hasattr(cls, key): setattr(cls, key, value)
                 else:
                     raise TypeError("Unexpected attribute '%s'" % key)
         
@@ -1091,20 +1086,17 @@ def {0}({1}):
         
         self._add_class(cls)
         
-        if func: # the original function may still be useful
-            return func
+        # the original function may still be useful
+        if func: return func
         
         return cls
     
     def _decorator(self, cls, base, kwargs, wrapinfos=None):
-        if cls:
-            return self._add_idnamable(cls, base, kwargs, wrapinfos)
-        else:
-            return (lambda cls: self._add_idnamable(cls, base, kwargs, wrapinfos))
+        if cls: return self._add_idnamable(cls, base, kwargs, wrapinfos)
+        return (lambda cls: self._add_idnamable(cls, base, kwargs, wrapinfos))
     
     def _Operator_resmap(value):
-        if isinstance(value, set):
-            return value
+        if isinstance(value, set): return value
         return ({'FINISHED'} if value else {'CANCELLED'})
     _Operator_wrapinfos = [
         dict(name="execute", args=("self", "context"), func_init=True, gen_init=True,

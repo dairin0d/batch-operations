@@ -194,6 +194,9 @@ class Aggregator:
             self._startswith = str.startswith
             self._endswith = str.endswith
             type = 'SEQUENCE'
+        elif type == 'BOOL':
+            if convert is None: convert = int
+            type = 'NUMBER'
         
         if queries is None:
             queries = self._all_queries[type]

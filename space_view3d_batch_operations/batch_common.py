@@ -110,28 +110,38 @@ class Pick_Base:
             return ({'FINISHED'} if confirm else {'CANCELLED'})
         return {'RUNNING_MODAL'}
 
-def LeftRightPanel(panel_class):
-    name = panel_class.__name__
-    poll = getattr(panel_class, "poll", None)
-    if poll:
-        poll_left = classmethod(lambda cls, context: addon.preferences.use_panel_left and poll(cls, context))
-        poll_right = classmethod(lambda cls, context: addon.preferences.use_panel_right and poll(cls, context))
-    else:
-        poll_left = classmethod(lambda cls, context: addon.preferences.use_panel_left)
-        poll_right = classmethod(lambda cls, context: addon.preferences.use_panel_right)
+def LeftRightPanel(cls=None, **kwargs):
+    def AddPanels(cls, kwargs):
+        doc = cls.__doc__
+        name = kwargs.get("bl_idname") or kwargs.get("idname") or cls.__name__
+        
+        # expected either class or function
+        if not isinstance(cls, type):
+            cls = type(name, (), dict(__doc__=doc, draw=cls))
+        
+        poll = getattr(cls, "poll", None)
+        if poll:
+            poll_left = classmethod(lambda cls, context: addon.preferences.use_panel_left and poll(cls, context))
+            poll_right = classmethod(lambda cls, context: addon.preferences.use_panel_right and poll(cls, context))
+        else:
+            poll_left = classmethod(lambda cls, context: addon.preferences.use_panel_left)
+            poll_right = classmethod(lambda cls, context: addon.preferences.use_panel_right)
+        
+        @addon.Panel(**kwargs)
+        class LeftPanel(cls):
+            bl_idname = name + "_left"
+            bl_region_type = 'TOOLS'
+            poll = poll_left
+        
+        @addon.Panel(**kwargs)
+        class RightPanel(cls):
+            bl_idname = name + "_right"
+            bl_region_type = 'UI'
+            poll = poll_right
+        
+        return cls
     
-    @addon.Panel
-    class LeftPanel(panel_class):
-        bl_idname = name + "_left"
-        bl_region_type = 'TOOLS'
-        poll = poll_left
-    
-    @addon.Panel
-    class RightPanel(panel_class):
-        bl_idname = name + "_right"
-        bl_region_type = 'UI'
-        poll = poll_right
-    
-    return panel_class
+    if cls: return AddPanels(cls, kwargs)
+    return (lambda cls: AddPanels(cls, kwargs))
 
 change_monitor = ChangeMonitor(update=False)
