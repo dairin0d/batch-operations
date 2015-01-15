@@ -40,7 +40,7 @@ from {0}dairin0d.utils_addon import AddonManager
 """.format(dairin0d_location))
 
 from .batch_common import (
-    copyattrs, attrs_to_dict, dict_to_attrs,
+    copyattrs, attrs_to_dict, dict_to_attrs, PatternRenamer,
     Pick_Base, LeftRightPanel,
     round_to_bool, is_visible, has_common_layers, idnames_separator
 )
@@ -62,50 +62,11 @@ by changing the corresponding slot's link type to 'OBJECT'.
 * Option "Reuse slots": when adding material, use unoccupied slots first, or always creating new ones
 """
 
-class PatternRenamer:
-    before = "\u0002"
-    after = "\u0003"
-    
-    @classmethod
-    def is_pattern(cls, value):
-        return (cls.before in value) or (cls.after in value)
-    
-    @classmethod
-    def make(cls, subseq, subseq_starts, subseq_ends):
-        pattern = subseq
-        if (not subseq_starts): pattern = cls.before + pattern
-        if (not subseq_ends) and subseq: pattern = pattern + cls.after
-        return pattern
-    
-    @classmethod
-    def apply(cls, value, src_pattern, pattern):
-        middle = src_pattern.lstrip(cls.before).rstrip(cls.after)
-        i_mid = value.index(middle)
-        
-        sL, sC, sR = "", value, ""
-        
-        if src_pattern.startswith(cls.before):
-            if middle:
-                sL = value[:i_mid]
-                sC = middle
-            else:
-                sL = middle
-        
-        if src_pattern.endswith(cls.after):
-            if middle:
-                sR = value[i_mid+len(middle):]
-                sC = middle
-        
-        return pattern.replace(cls.before, sL).replace(cls.after, sR)
-    
-    @classmethod
-    def apply_to_attr(cls, obj, attr_name, pattern, src_pattern):
-        setattr(obj, attr_name, cls.apply(getattr(obj, attr_name), src_pattern, pattern))
-
 #============================================================================#
 Category_Name = "Material"
 CATEGORY_NAME = Category_Name.upper()
 category_name = Category_Name.lower()
+category_icon = 'MATERIAL'
 
 Material = bpy.types.Material
 MaterialSlot = bpy.types.MaterialSlot
@@ -148,7 +109,7 @@ class BatchOperations:
     def iter_names(cls, obj):
         for ms in obj.material_slots:
             if not ms.material: continue
-            yield cls.clean_name(ms.material)
+            yield ms.name
     
     @classmethod
     def enum_all(cls):
@@ -157,11 +118,11 @@ class BatchOperations:
     
     @classmethod
     def icon_kwargs(cls, idname):
-        if not idname: return {"icon": 'MATERIAL'}
+        if not idname: return {"icon": category_icon}
         try:
             return {"icon_value": bpy.types.UILayout.icon(bpy.data.materials.get(idname))}
         except:
-            return {"icon": 'MATERIAL'}
+            return {"icon": category_icon}
     
     @classmethod
     def iterate(cls, search_in, context=None):
@@ -202,7 +163,12 @@ class BatchOperations:
     def split_idnames(cls, idnames):
         if idnames is None: return None
         if not isinstance(idnames, str): return set(idnames)
-        return {n.strip() for n in idnames.split(idnames_separator)}
+        return {n for n in idnames.split(idnames_separator)}
+    
+    @classmethod
+    def new(cls, idname):
+        mat = bpy.data.materials.new(idname)
+        return mat.name
     
     @classmethod
     def set_attr(cls, name, value, objects, idnames, **kwargs):
@@ -213,6 +179,7 @@ class BatchOperations:
             
             for idname in idnames:
                 mat = cls.to_material(idname)
+                if not mat: continue
                 
                 if value:
                     # can't set use_fake_user if 0 users
@@ -251,7 +218,6 @@ class BatchOperations:
                         if ms.name in idnames:
                             _setattr(ms.material, name, value, **kwargs)
     
-    
     @classmethod
     def clear(cls, objects):
         for obj in objects:
@@ -268,7 +234,7 @@ class BatchOperations:
     def assign(cls, active_obj, objects, idnames):
         idnames = cls.split_idnames(idnames)
         for obj in objects:
-            for idname in idnames.difference(ms.name for ms in obj.material_slots):
+            for idname in idnames.difference(cls.iter_names(obj)):
                 cls.add_material_to_obj(obj, idname)
     
     @classmethod
@@ -276,26 +242,41 @@ class BatchOperations:
         cls.replace(objects, idnames, "", from_file)
     
     @classmethod
-    def replace(cls, objects, src_idnames, dst_idname, from_file=False):
+    def replace(cls, objects, src_idnames, dst_idname, from_file=False, purge=False):
         idnames = cls.split_idnames(src_idnames)
         dst_material = cls.to_material(dst_idname)
+        
+        replaced_idnames = set()
+        
         if not from_file:
             for obj in objects:
                 for ms in obj.material_slots:
                     if (idnames is None) or (ms.name in idnames):
+                        if ms.name: replaced_idnames.add(ms.name)
                         ms.link = 'OBJECT'
                         ms.material = dst_material
         else:
             for obj in bpy.data.objects:
                 for ms in obj.material_slots:
                     if (idnames is None) or (ms.name in idnames):
+                        if ms.name: replaced_idnames.add(ms.name)
                         ms.material = dst_material
+            
             for datas in (bpy.data.meshes, bpy.data.curves, bpy.data.metaballs):
                 for data in datas:
                     for i in range(len(data.materials)):
                         mat = data.materials[i]
-                        if mat and ((idnames is None) or (mat.name in idnames)):
+                        if (idnames is None) or (mat and (mat.name in idnames)):
+                            if mat.name: replaced_idnames.add(mat.name)
                             data.materials[i] = dst_material
+        
+        replaced_idnames.discard(dst_idname)
+        
+        if purge and replaced_idnames:
+            cls.set_attr("use_fake_user", False, None, replaced_idnames)
+            for mat in tuple(bpy.data.materials):
+                if mat.name in replaced_idnames:
+                    bpy.data.materials.remove(mat)
     
     @classmethod
     def select(cls, scene, idnames):
@@ -339,13 +320,47 @@ class BatchOperations:
         else:
             for obj in objects:
                 cls.clear_obj_materials(obj, idnames, False)
+    
+    @classmethod
+    def merge_identical(cls):
+        unique = set(bpy.data.materials)
+        identical = []
+        ignore = {"name"}
+        
+        for item in bpy.data.materials:
+            duplicates = None
+            unique.discard(item)
+            
+            for item2 in unique:
+                if BlRna.compare(item, item2, ignore=ignore):
+                    if duplicates is None: duplicates = {item}
+                    duplicates.add(item2)
+            
+            if duplicates is not None:
+                identical.append(duplicates)
+                unique.difference_update(duplicates)
+        
+        for duplicates in identical:
+            # find best candidate for preservation
+            best, best_users, best_len = None, 0, 0
+            for item in duplicates:
+                if item.users >= best_users:
+                    is_better = (item.users > best_users)
+                    is_better |= (best_len <= 0)
+                    is_better |= (len(item.name) < best_len)
+                    if is_better:
+                        best, best_users, best_len = item, item.users, len(item.name)
+            duplicates.discard(best)
+            src_idnames = idnames_separator.join(item.name for item in duplicates)
+            dst_idname = best.name
+            cls.replace(None, src_idnames, dst_idname, from_file=True, purge=True)
 
 #============================================================================#
 @addon.Menu(idname="OBJECT_MT_batch_{}_add".format(category_name), description=
 "Add {}(s)".format(Category_Name))
 def Menu_Add(self, context):
     layout = NestedLayout(self.layout)
-    op = layout.operator("object.batch_{}_add".format(category_name), text="<Create new>", icon='MATERIAL')
+    op = layout.operator("object.batch_{}_add".format(category_name), text="<Create new>", icon=category_icon)
     op.create = True
     for item in CategoryPG.remaining_items:
         idname = item[0]
@@ -353,7 +368,7 @@ def Menu_Add(self, context):
         #icon_kw = BatchOperations.icon_kwargs(idname)
         #op = layout.operator("object.batch_{}_add".format(category_name), text=name, **icon_kw)
         # layout.operator() doesn't support icon_value argument
-        op = layout.operator("object.batch_{}_add".format(category_name), text=name, icon='MATERIAL')
+        op = layout.operator("object.batch_{}_add".format(category_name), text=name, icon=category_icon)
         op.idnames = idname
 
 @addon.Operator(idname="view3d.pick_{}s".format(category_name), options={'INTERNAL', 'REGISTER'}, description=
@@ -406,9 +421,7 @@ def Operator_Add(self, context, event, idnames="", create=False):
     category = get_category()
     options = get_options()
     bpy.ops.ed.undo_push(message="Batch Add {}s".format(Category_Name))
-    if create:
-        mat = bpy.data.materials.new("Material")
-        idnames = mat.name
+    if create: idnames = BatchOperations.new("Material")
     BatchOperations.add(options.iterate_objects(context), idnames)
     category.tag_refresh()
     return {'FINISHED'}
@@ -420,8 +433,9 @@ def Operator_Replace(self, context, event, idnames="", index=0):
     options = get_options()
     if event.alt:
         if index > 0: # not applicable to "All"
+            globally = event.ctrl or (options.search_in == 'FILE')
             bpy.ops.ed.undo_push(message="Batch Replace {}s".format(Category_Name))
-            BatchOperations.replace(options.iterate_objects(context, event.ctrl), None, idnames, (options.search_in == 'FILE'))
+            BatchOperations.replace(options.iterate_objects(context, globally), None, idnames, globally, purge=globally)
             category.tag_refresh()
             return {'FINISHED'}
     else:
@@ -431,7 +445,7 @@ def Operator_Replace(self, context, event, idnames="", index=0):
             for item in BatchOperations.enum_all():
                 idname = item[0]
                 name = item[1]
-                op = layout.operator("object.batch_{}_replace_reverse".format(category_name), text=name, icon='MATERIAL')
+                op = layout.operator("object.batch_{}_replace_reverse".format(category_name), text=name, icon=category_icon)
                 op.src_idnames = idnames
                 op.dst_idname = idname
                 op.globally = globally
@@ -443,8 +457,9 @@ def Operator_Replace_Reverse(self, context, event, src_idnames="", dst_idname=""
     category = get_category()
     options = get_options()
     if event is not None: globally |= event.ctrl # ? maybe XOR?
+    globally |= (options.search_in == 'FILE')
     bpy.ops.ed.undo_push(message="Batch Replace {}s".format(Category_Name))
-    BatchOperations.replace(options.iterate_objects(context, globally), src_idnames, dst_idname, (options.search_in == 'FILE'))
+    BatchOperations.replace(options.iterate_objects(context, globally), src_idnames, dst_idname, globally, purge=globally)
     category.tag_refresh()
     return {'FINISHED'}
 
@@ -615,12 +630,16 @@ class CategoryOptionsPG:
         category = get_category()
         category.tag_refresh()
     
-    paste_mode = 'SET' | prop("Copy/Paste mode", update=update, items=[
+    paste_mode_icons = {'SET':'ROTACTIVE', 'OR':'ROTATECOLLECTION', 'AND':'ROTATECENTER'}
+    paste_mode = 'SET' | prop("Paste mode", update=update, items=[
         ('SET', "Replace", "Replace objects' {}(s) with the copied ones".format(category_name), 'ROTACTIVE'),
         ('OR', "Add", "Add copied {}(s) to objects".format(category_name), 'ROTATECOLLECTION'),
         ('AND', "Filter", "Remove objects' {}(s) that are not among the copied".format(category_name), 'ROTATECENTER'),
     ])
-    search_in = 'SELECTION' | prop("Show summary for", update=update, items=[
+    
+    search_in_icons = {'SELECTION':'RESTRICT_SELECT_OFF', 'VISIBLE':'RESTRICT_VIEW_OFF',
+        'LAYER':'RENDERLAYERS', 'SCENE':'SCENE_DATA', 'FILE':'FILE_BLEND'}
+    search_in = 'SELECTION' | prop("Filter", update=update, items=[
         ('SELECTION', "Selection", "Display {}(s) of the selection".format(category_name), 'RESTRICT_SELECT_OFF'),
         ('VISIBLE', "Visible", "Display {}(s) of the visible objects".format(category_name), 'RESTRICT_VIEW_OFF'),
         ('LAYER', "Layer", "Display {}(s) of the objects in the visible layers".format(category_name), 'RENDERLAYERS'),
@@ -644,6 +663,7 @@ class CategoryPG:
         if CategoryPG.rename_id < 0: return
         category = get_category()
         options = get_options()
+        # The bad thing is, undo seems to not be pushed from an update callback
         bpy.ops.ed.undo_push(message="Rename {}".format(category_name))
         idnames = category.items[CategoryPG.rename_id].idname or category.all_idnames
         BatchOperations.set_attr("name", self.rename, options.iterate(context), idnames, src_pattern=CategoryPG.src_pattern)
@@ -719,7 +739,7 @@ class CategoryPG:
         
         processing_time = time.clock() - processing_time
         # Disable autorefresh if it takes too much time
-        if processing_time > 0.05: options.autorefresh = False
+        #if processing_time > 0.05: options.autorefresh = False
         
         self.needs_refresh = False
     
@@ -775,11 +795,21 @@ def Menu_SearchIn(self, context):
 
 @addon.Operator(idname="object.batch_{}_purge_unused".format(category_name), options={'INTERNAL', 'REGISTER'}, description=
 "Click: Purge unused (+Ctrl: even those with use_fake_users)", label="Purge unused")
-def Operator_Purge_Unused(self, context, event, idnames="", index=0):
+def Operator_Purge_Unused(self, context, event):
     category = get_category()
     options = get_options()
     bpy.ops.ed.undo_push(message="Purge Unused {}s".format(Category_Name))
     BatchOperations.purge(event.ctrl)
+    category.tag_refresh()
+    return {'FINISHED'}
+
+@addon.Operator(idname="object.batch_{}_merge_identical".format(category_name), options={'INTERNAL', 'REGISTER'}, description=
+"Click: Merge identical", label="Merge identical")
+def Operator_Merge_Identical(self, context, event):
+    category = get_category()
+    options = get_options()
+    bpy.ops.ed.undo_push(message="Merge Identical {}s".format(Category_Name))
+    BatchOperations.merge_identical()
     category.tag_refresh()
     return {'FINISHED'}
 
@@ -791,8 +821,9 @@ def Menu_Options(self, context):
     with layout.column():
         layout.prop(options, "synchronized")
         layout.menu("VIEW3D_MT_batch_{}s_options_paste_mode".format(category_name), icon='PASTEDOWN')
-        layout.menu("VIEW3D_MT_batch_{}s_options_search_in".format(category_name), icon='VIEWZOOM')
+        layout.menu("VIEW3D_MT_batch_{}s_options_search_in".format(category_name), icon='VIEWZOOM') # FILTER?
         layout.operator("object.batch_{}_purge_unused".format(category_name), icon='GHOST_DISABLED')
+        layout.operator("object.batch_{}_merge_identical".format(category_name), icon='AUTOMERGE_ON')
 
 @addon.Operator(idname="object.batch_{}_refresh".format(category_name), options={'INTERNAL', 'REGISTER'}, description=
 "Click: Force refresh; Ctrl+Click: Toggle auto-refresh")
@@ -806,29 +837,36 @@ def Operator_Refresh(self, context, event):
     return {'FINISHED'}
 
 @LeftRightPanel(idname="VIEW3D_PT_batch_{}s".format(category_name), context="objectmode", space_type='VIEW_3D', category="Batch", label="Batch {}s".format(Category_Name))
-def Panel_Category(self, context):
-    layout = NestedLayout(self.layout)
-    category = get_category()
-    options = get_options()
-    
-    with layout.row():
+class Panel_Category:
+    def draw_header(self, context):
+        layout = NestedLayout(self.layout)
+        category = get_category()
+        options = get_options()
         with layout.row(True):
-            layout.menu("OBJECT_MT_batch_{}_add".format(category_name), icon='ZOOMIN', text="")
-            layout.operator("view3d.pick_{}s".format(category_name), icon='EYEDROPPER', text="")
-            layout.operator("object.batch_{}_copy".format(category_name), icon='COPYDOWN', text="")
-            layout.operator("object.batch_{}_paste".format(category_name), icon='PASTEDOWN', text="")
-        
-        icon = ('PREVIEW_RANGE' if options.autorefresh else 'FILE_REFRESH')
-        layout.operator("object.batch_{}_refresh".format(category_name), icon=icon, text="")
-        
-        #icon = ('SCRIPTWIN' if options.synchronized else 'SCRIPTPLUGINS')
-        icon = ('SCRIPTPLUGINS' if options.synchronized else 'SCRIPTWIN')
-        #icon = ('SOLO_ON' if options.synchronized else 'SOLO_OFF')
-        #icon = ('LOCKVIEW_ON' if options.synchronized else 'LOCKVIEW_OFF')
-        #icon = ('COLOR_GREEN' if options.synchronized else 'COLOR_BLUE')
-        layout.menu("VIEW3D_MT_batch_{}s_options".format(category_name), icon=icon, text="")
+            icon = CategoryOptionsPG.search_in_icons[options.search_in]
+            layout.prop_menu_enum(options, "search_in", text="", icon=icon)
+            icon = CategoryOptionsPG.paste_mode_icons[options.paste_mode]
+            layout.prop_menu_enum(options, "paste_mode", text="", icon=icon)
     
-    category.draw(layout)
+    def draw(self, context):
+        layout = NestedLayout(self.layout)
+        category = get_category()
+        options = get_options()
+        
+        with layout.row():
+            with layout.row(True):
+                layout.menu("OBJECT_MT_batch_{}_add".format(category_name), icon='ZOOMIN', text="")
+                layout.operator("view3d.pick_{}s".format(category_name), icon='EYEDROPPER', text="")
+                layout.operator("object.batch_{}_copy".format(category_name), icon='COPYDOWN', text="")
+                layout.operator("object.batch_{}_paste".format(category_name), icon='PASTEDOWN', text="")
+            
+            icon = ('PREVIEW_RANGE' if options.autorefresh else 'FILE_REFRESH')
+            layout.operator("object.batch_{}_refresh".format(category_name), icon=icon, text="")
+            
+            icon = ('SCRIPTPLUGINS' if options.synchronized else 'SCRIPTWIN')
+            layout.menu("VIEW3D_MT_batch_{}s_options".format(category_name), icon=icon, text="")
+        
+        category.draw(layout)
 
 addon.External.materials = CategoryPG | -prop()
 get_category = (lambda: addon.external.materials)

@@ -233,6 +233,10 @@ class BlEnums:
 
 #============================================================================#
 
+# A lot of bpy.types inherit from bpy_struct,
+# but bpy_struct itself is not present there
+bpy_struct = bpy.types.AnyType.__base__
+
 class BlRna:
     rna_to_bpy = {
         "BoolProperty":(bpy.props.BoolProperty, bpy.props.BoolVectorProperty),
@@ -248,8 +252,7 @@ class BlRna:
     def to_bpy_prop(rna_prop):
         type_id = rna_prop.rna_type.identifier
         bpy_prop = BlRna.rna_to_bpy.get(type_id)
-        if not bpy_prop:
-            return None
+        if not bpy_prop: return None
         
         bpy_args = dict(name=rna_prop.name, description=rna_prop.description, options=set())
         def map_arg(rna_name, bpy_name, is_option=False):
@@ -296,7 +299,7 @@ class BlRna:
         
         return (bpy_prop, bpy_args)
     
-    # NOTE: we an't just compare value to the result of get_default(),
+    # NOTE: we can't just compare value to the result of get_default(),
     # because in some places Blender's return values not always correspond
     # to the subtype declared in rna (e.g. TRANSFORM_OT_translate.value
     # returns a Vector, but its subtype is 'NONE')
@@ -393,13 +396,13 @@ class BlRna:
     @staticmethod
     def deserialize(obj, data, ignore_default=False, suppress_errors=False):
         """Deserialize object's rna properties"""
-        if (not obj) or (not data):
-            return
+        if (not obj) or (not data): return
+        
         rna_props = obj.bl_rna.properties
         for name, value in data.items():
             rna_prop = rna_props.get(name)
-            if rna_prop is None:
-                continue
+            if rna_prop is None: continue
+            
             type_id = rna_prop.rna_type.identifier
             if type_id == "PointerProperty":
                 BlRna.deserialize(getattr(obj, name), value, ignore_default, suppress_errors)
@@ -413,25 +416,31 @@ class BlRna:
                     if (type_id == "EnumProperty") and rna_prop.is_enum_flag:
                         value = set(value) # might be other collection type when loaded from JSON
                     
-                    if not suppress_errors:
+                    try:
                         setattr(obj, name, value)
-                    else:
-                        try:
-                            setattr(obj, name, value)
-                        except:
-                            pass # sometimes Blender's rna is incomplete/incorrect
+                    except:
+                        # sometimes Blender's rna is incomplete/incorrect
+                        if not suppress_errors: raise
     
     @staticmethod
     def serialize(obj, ignore_default=False):
         """Serialize object's rna properties"""
-        if not obj:
-            return None
+        if not obj: return None
         data = {}
-        for name, rna_prop in BlRna.properties(obj):
-            value = getattr(obj, name)
-            value = BlRna.serialize_value(value) # need to serialize before comparison
-            if (not ignore_default) or (not BlRna.is_default(value, rna_prop)):
-                data[name] = value
+        if not ignore_default:
+            for name, rna_prop in BlRna.properties(obj):
+                value = getattr(obj, name)
+                data[name] = BlRna.serialize_value(value)
+        elif hasattr(obj, "is_property_set"): # method of bpy_struct
+            for name, rna_prop in BlRna.properties(obj):
+                if obj.is_property_set(name):
+                    value = getattr(obj, name)
+                    data[name] = BlRna.serialize_value(value)
+        else:
+            for name, rna_prop in BlRna.properties(obj):
+                value = getattr(obj, name)
+                if not BlRna.is_default(value, rna_prop):
+                    data[name] = BlRna.serialize_value(value)
         return data
     
     @staticmethod
@@ -457,6 +466,40 @@ class BlRna:
         elif class_name == "bpy_prop_collection_idprop":
             value = [BlRna.serialize_value(item, recursive) for item in value]
         return value
+    
+    @staticmethod
+    def compare_prop(rna_prop, valueA, valueB):
+        if rna_prop.type == 'POINTER':
+            ft = rna_prop.fixed_type
+            if isinstance(ft, bpy.types.ID):
+                # idblocks are used only by reference
+                return valueA == valueB
+            return BlRna.compare(valueA, valueB)
+        elif rna_prop.type == 'COLLECTION':
+            if len(valueA) != len(valueB): return False
+            return all(BlRna.compare(valueA[i], valueB[i])
+                for i in range(len(valueA)))
+        else: # primitive types or enum
+            if hasattr(rna_prop, "array_length"):
+                if rna_prop.array_length != 0:
+                    if not isinstance(valueA, Matrix):
+                        return tuple(valueA) == tuple(valueB)
+            return valueA == valueB
+    
+    @staticmethod
+    def compare(objA, objB, ignore=()):
+        """Compare objects' rna properties"""
+        if (objA is None) and (objB is None): return True
+        if (objA is None) or (objB is None): return False
+        if objA == objB: return True
+        # objects are expected to be of the same type
+        for name, rna_prop in BlRna.properties(objA):
+            if name in ignore: continue
+            valueA = getattr(objA, name)
+            valueB = getattr(objB, name)
+            if not BlRna.compare_prop(rna_prop, valueA, valueB):
+                return False
+        return True
 
 #============================================================================#
 

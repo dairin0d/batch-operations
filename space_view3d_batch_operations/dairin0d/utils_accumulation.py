@@ -21,6 +21,7 @@ import bpy
 import math
 import bisect
 
+from .utils_python import sequence_startswith, sequence_endswith
 from .utils_text import indent, longest_common_substring
 from .bpy_inspect import prop
 
@@ -190,6 +191,8 @@ class Aggregator:
     def __init__(self, type, queries=None, convert=None):
         self._type = type
         
+        self._startswith = sequence_startswith
+        self._endswith = sequence_endswith
         if type == 'STRING':
             self._startswith = str.startswith
             self._endswith = str.endswith
@@ -403,22 +406,13 @@ class Aggregator:
             else:
                 self._subseq_ends = False
         if self._subseq and not (self._subseq_starts or self._subseq_ends):
+            prev_subseq = self._subseq
             self._subseq = next(iter(longest_common_substring(self._subseq, value)), None) or value[0:0]
             if self._subseq:
-                self._subseq_starts = self._startswith(value, self._subseq)
-                self._subseq_ends = self._endswith(value, self._subseq)
-    
-    @staticmethod
-    def _startswith(a, b):
-        na = len(a); nb = len(b)
-        if nb > na: return False
-        return all(a[i] == b[i] for i in range(nb))
-    
-    @staticmethod
-    def _endswith(a, b):
-        na = len(a); nb = len(b)
-        if nb > na: return False
-        return all(a[na-i] == b[nb-i] for i in range(1, nb+1))
+                if self._startswith(prev_subseq, self._subseq):
+                    self._subseq_starts = self._startswith(value, self._subseq)
+                if self._endswith(prev_subseq, self._subseq):
+                    self._subseq_ends = self._endswith(value, self._subseq)
 
 class VectorAggregator:
     def __init__(self, size, type, queries=None, covert=None):

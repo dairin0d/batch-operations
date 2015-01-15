@@ -51,6 +51,7 @@ addon = AddonManager()
 Category_Name = "Modifier"
 CATEGORY_NAME = Category_Name.upper()
 category_name = Category_Name.lower()
+category_icon = 'MODIFIER'
 
 class BatchOperations:
     clipbuffer = None
@@ -73,7 +74,7 @@ class BatchOperations:
     
     @classmethod
     def icon_kwargs(cls, idname):
-        return {"icon": BlEnums.modifier_icons.get(idname, 'MODIFIER')}
+        return {"icon": BlEnums.modifier_icons.get(idname, category_icon)}
     
     @classmethod
     def iterate(cls, search_in, context=None):
@@ -108,7 +109,9 @@ class BatchOperations:
     
     @classmethod
     def split_idnames(cls, idnames):
-        return {n.strip() for n in idnames.split(idnames_separator)}
+        if idnames is None: return None
+        if not isinstance(idnames, str): return set(idnames)
+        return {n for n in idnames.split(idnames_separator)}
     
     @classmethod
     def set_attr(cls, name, value, objects, idnames):
@@ -453,18 +456,23 @@ class CategoryOptionsPG:
         category = get_category()
         category.tag_refresh()
     
-    paste_mode = 'SET' | prop("Copy/Paste mode", update=update, items=[
+    paste_mode_icons = {'SET':'ROTACTIVE', 'OR':'ROTATECOLLECTION', 'AND':'ROTATECENTER'}
+    paste_mode = 'SET' | prop("Paste mode", update=update, items=[
         ('SET', "Replace", "Replace objects' {}(s) with the copied ones".format(category_name), 'ROTACTIVE'),
         ('OR', "Add", "Add copied {}(s) to objects".format(category_name), 'ROTATECOLLECTION'),
         ('AND', "Filter", "Remove objects' {}(s) that are not among the copied".format(category_name), 'ROTATECENTER'),
     ])
-    search_in = 'SELECTION' | prop("Show summary for", update=update, items=[
+    
+    search_in_icons = {'SELECTION':'RESTRICT_SELECT_OFF', 'VISIBLE':'RESTRICT_VIEW_OFF',
+        'LAYER':'RENDERLAYERS', 'SCENE':'SCENE_DATA', 'FILE':'FILE_BLEND'}
+    search_in = 'SELECTION' | prop("Filter", update=update, items=[
         ('SELECTION', "Selection", "Display {}(s) of the selection".format(category_name), 'RESTRICT_SELECT_OFF'),
         ('VISIBLE', "Visible", "Display {}(s) of the visible objects".format(category_name), 'RESTRICT_VIEW_OFF'),
         ('LAYER', "Layer", "Display {}(s) of the objects in the visible layers".format(category_name), 'RENDERLAYERS'),
         ('SCENE', "Scene", "Display {}(s) of the objects in the current scene".format(category_name), 'SCENE_DATA'),
         ('FILE', "File", "Display all {}(s) in this file".format(category_name), 'FILE_BLEND'),
     ])
+    
     apply_options = {'CONVERT_TO_MESH', 'MAKE_SINGLE_USER', 'REMOVE_DISABLED'} | prop("Apply Modifier options", update=update, items=[
         ('CONVERT_TO_MESH', "Convert to mesh", "Convert to mesh", 'OUTLINER_OB_MESH'),
         ('MAKE_SINGLE_USER', "Make single user", "Make single user", 'UNLINKED'),
@@ -547,7 +555,7 @@ class CategoryPG:
         
         processing_time = time.clock() - processing_time
         # Disable autorefresh if it takes too much time
-        if processing_time > 0.05: options.autorefresh = False
+        #if processing_time > 0.05: options.autorefresh = False
         
         self.needs_refresh = False
     
@@ -609,7 +617,7 @@ def Menu_Options(self, context):
         layout.prop(options, "synchronized")
         layout.menu("VIEW3D_MT_batch_{}s_options_paste_mode".format(category_name), icon='PASTEDOWN')
         layout.menu("VIEW3D_MT_batch_{}s_options_search_in".format(category_name), icon='VIEWZOOM')
-        layout.menu("VIEW3D_MT_batch_{}s_options_apply_options".format(category_name), icon='MODIFIER')
+        layout.menu("VIEW3D_MT_batch_{}s_options_apply_options".format(category_name), icon=category_icon)
 
 @addon.Operator(idname="object.batch_{}_refresh".format(category_name), options={'INTERNAL', 'REGISTER'}, description=
 "Click: Force refresh; Ctrl+Click: Toggle auto-refresh")
@@ -623,29 +631,36 @@ def Operator_Refresh(self, context, event):
     return {'FINISHED'}
 
 @LeftRightPanel(idname="VIEW3D_PT_batch_{}s".format(category_name), context="objectmode", space_type='VIEW_3D', category="Batch", label="Batch {}s".format(Category_Name))
-def Panel_Category(self, context):
-    layout = NestedLayout(self.layout)
-    category = get_category()
-    options = get_options()
-    
-    with layout.row():
+class Panel_Category:
+    def draw_header(self, context):
+        layout = NestedLayout(self.layout)
+        category = get_category()
+        options = get_options()
         with layout.row(True):
-            layout.menu("OBJECT_MT_batch_{}_add".format(category_name), icon='ZOOMIN', text="")
-            layout.operator("view3d.pick_{}s".format(category_name), icon='EYEDROPPER', text="")
-            layout.operator("object.batch_{}_copy".format(category_name), icon='COPYDOWN', text="")
-            layout.operator("object.batch_{}_paste".format(category_name), icon='PASTEDOWN', text="")
-        
-        icon = ('PREVIEW_RANGE' if options.autorefresh else 'FILE_REFRESH')
-        layout.operator("object.batch_{}_refresh".format(category_name), icon=icon, text="")
-        
-        #icon = ('SCRIPTWIN' if options.synchronized else 'SCRIPTPLUGINS')
-        icon = ('SCRIPTPLUGINS' if options.synchronized else 'SCRIPTWIN')
-        #icon = ('SOLO_ON' if options.synchronized else 'SOLO_OFF')
-        #icon = ('LOCKVIEW_ON' if options.synchronized else 'LOCKVIEW_OFF')
-        #icon = ('COLOR_GREEN' if options.synchronized else 'COLOR_BLUE')
-        layout.menu("VIEW3D_MT_batch_{}s_options".format(category_name), icon=icon, text="")
+            icon = CategoryOptionsPG.search_in_icons[options.search_in]
+            layout.prop_menu_enum(options, "search_in", text="", icon=icon)
+            icon = CategoryOptionsPG.paste_mode_icons[options.paste_mode]
+            layout.prop_menu_enum(options, "paste_mode", text="", icon=icon)
     
-    category.draw(layout)
+    def draw(self, context):
+        layout = NestedLayout(self.layout)
+        category = get_category()
+        options = get_options()
+        
+        with layout.row():
+            with layout.row(True):
+                layout.menu("OBJECT_MT_batch_{}_add".format(category_name), icon='ZOOMIN', text="")
+                layout.operator("view3d.pick_{}s".format(category_name), icon='EYEDROPPER', text="")
+                layout.operator("object.batch_{}_copy".format(category_name), icon='COPYDOWN', text="")
+                layout.operator("object.batch_{}_paste".format(category_name), icon='PASTEDOWN', text="")
+            
+            icon = ('PREVIEW_RANGE' if options.autorefresh else 'FILE_REFRESH')
+            layout.operator("object.batch_{}_refresh".format(category_name), icon=icon, text="")
+            
+            icon = ('SCRIPTPLUGINS' if options.synchronized else 'SCRIPTWIN')
+            layout.menu("VIEW3D_MT_batch_{}s_options".format(category_name), icon=icon, text="")
+        
+        category.draw(layout)
 
 addon.External.modifiers = CategoryPG | -prop()
 get_category = (lambda: addon.external.modifiers)

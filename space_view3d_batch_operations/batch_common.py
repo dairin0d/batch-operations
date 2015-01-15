@@ -76,6 +76,45 @@ def dict_to_attrs(obj, d):
             except:
                 pass
 
+class PatternRenamer:
+    before = "\u2190"
+    after = "\u2192"
+    whole = "\u2194"
+    
+    @classmethod
+    def is_pattern(cls, value):
+        return (cls.before in value) or (cls.after in value) or (cls.whole in value)
+    
+    @classmethod
+    def make(cls, subseq, subseq_starts, subseq_ends):
+        pattern = subseq
+        if (not subseq_starts): pattern = cls.before + pattern
+        if (not subseq_ends): pattern = pattern + cls.after
+        if (pattern == cls.before+cls.after): pattern = cls.whole
+        return pattern
+    
+    @classmethod
+    def apply(cls, value, src_pattern, pattern):
+        middle = src_pattern.lstrip(cls.before).rstrip(cls.after).rstrip(cls.whole)
+        if middle not in value: return value # pattern not applicable
+        i_mid = value.index(middle)
+        
+        sL, sC, sR = "", value, ""
+        
+        if src_pattern.startswith(cls.before):
+            if middle:
+                sL = value[:i_mid]
+        
+        if src_pattern.endswith(cls.after):
+            if middle:
+                sR = value[i_mid+len(middle):]
+        
+        return pattern.replace(cls.before, sL).replace(cls.after, sR).replace(cls.whole, sC)
+    
+    @classmethod
+    def apply_to_attr(cls, obj, attr_name, pattern, src_pattern):
+        setattr(obj, attr_name, cls.apply(getattr(obj, attr_name), src_pattern, pattern))
+
 class Pick_Base:
     def invoke(self, context, event):
         context.window.cursor_modal_set('EYEDROPPER')

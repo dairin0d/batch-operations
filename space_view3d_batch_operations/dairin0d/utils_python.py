@@ -48,6 +48,20 @@ def ensure_baseclass(cls, base):
 def issubclass_safe(value, classinfo):
     return (issubclass(value, classinfo) if isinstance(value, type) else None)
 
+def sequence_compare(seqA, seqB):
+    if len(seqA) != len(seqB): return False
+    return all(seqA[i] == seqB[i] for i in range(len(seqA)))
+
+def sequence_startswith(a, b):
+    na = len(a); nb = len(b)
+    if nb > na: return False
+    return all(a[i] == b[i] for i in range(nb))
+
+def sequence_endswith(a, b):
+    na = len(a); nb = len(b)
+    if nb > na: return False
+    return all(a[na-i] == b[nb-i] for i in range(1, nb+1))
+
 # Primary function of such objects is to store
 # attributes and values assigned to an instance
 class AttributeHolder:

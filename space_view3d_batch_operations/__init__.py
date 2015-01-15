@@ -19,7 +19,7 @@ bl_info = {
     "name": "Batch Operations",
     "description": "Batch control of modifiers, etc.",
     "author": "dairin0d, moth3r",
-    "version": (0, 2, 6),
+    "version": (0, 3, 0),
     "blender": (2, 7, 0),
     "location": "View3D > Batch category in Tools panel",
     "warning": "",
@@ -34,6 +34,7 @@ if "dairin0d" in locals():
     imp.reload(batch_common)
     imp.reload(batch_modifiers)
     imp.reload(batch_materials)
+    imp.reload(batch_groups)
 
 import bpy
 
@@ -59,6 +60,7 @@ from {0}dairin0d.utils_addon import AddonManager
 from .batch_common import copyattrs, attrs_to_dict, dict_to_attrs, Pick_Base, LeftRightPanel, change_monitor
 from . import batch_modifiers
 from . import batch_materials
+from . import batch_groups
 
 addon = AddonManager()
 
@@ -77,6 +79,10 @@ Make a general mechanism of serializing/deserializing links to ID blocks? (also 
 
 
 investigate if it's possible to make a shortcut to jump to certain tab in tool shelf
+
+
+for copy/pasting (and other operations that work on active object),
+    take into account SpaceProperties.use_pin_id and SpaceProperties.pin_id?
 
 
 syncronization of batch options (show different icon when synchronized)
@@ -185,18 +191,16 @@ def Batch_Properties_Copy(self, context):
     properties_context = context.space_data.context
     if properties_context == 'MODIFIER':
         bpy.ops.object.batch_modifier_copy()
-        #Batch_Copy_Modifiers(self, context)
-    #print(context.space_data.type)
-    #print(context.space_data.context)
+    elif properties_context == 'MATERIAL':
+        bpy.ops.object.batch_material_copy()
 
 @addon.Operator(idname="object.batch_properties_paste", space_type='PROPERTIES')
 def Batch_Properties_Copy(self, context):
     properties_context = context.space_data.context
     if properties_context == 'MODIFIER':
         bpy.ops.object.batch_modifier_paste()
-        #Batch_Paste_Modifiers(self, context)
-    #print(context.space_data.type)
-    #print(context.space_data.context)
+    elif properties_context == 'MATERIAL':
+        bpy.ops.object.batch_material_paste()
 
 @addon.Preferences.Include
 class ThisAddonPreferences:
@@ -209,7 +213,6 @@ class ThisAddonPreferences:
         
         with layout.row():
             layout.prop(self, "refresh_interval")
-            #layout.label("Show in:")
             layout.prop(self, "use_panel_left")
             layout.prop(self, "use_panel_right")
 
