@@ -27,9 +27,11 @@ import re
 #        i += 1
 #    return name
 
-def compress_whitespace(s):
-    return " ".join(s.split())
+# keep_newlines is False by default because Blender doesn't support multi-line tooltips
+def compress_whitespace(s, keep_newlines=False):
     #return re.sub("\\s+", " ", s).strip()
+    if not keep_newlines: return " ".join(s.split())
+    return "\n".join(" ".join(l.split()) for l in s.splitlines())
 
 def indent(s, t):
     res = []

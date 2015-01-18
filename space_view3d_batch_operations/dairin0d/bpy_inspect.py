@@ -487,7 +487,7 @@ class BlRna:
             return valueA == valueB
     
     @staticmethod
-    def compare(objA, objB, ignore=()):
+    def compare(objA, objB, ignore=(), specials={}):
         """Compare objects' rna properties"""
         if (objA is None) and (objB is None): return True
         if (objA is None) or (objB is None): return False
@@ -497,7 +497,11 @@ class BlRna:
             if name in ignore: continue
             valueA = getattr(objA, name)
             valueB = getattr(objB, name)
-            if not BlRna.compare_prop(rna_prop, valueA, valueB):
+            if name in specials:
+                if not specials[name](rna_prop, valueA, valueB):
+                    return False
+            elif not BlRna.compare_prop(rna_prop, valueA, valueB):
+                #print("Not same: {} in {}/{}".format(name, type(valueA), type(valueB)))
                 return False
         return True
 
