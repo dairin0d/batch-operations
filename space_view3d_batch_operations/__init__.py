@@ -19,7 +19,7 @@ bl_info = {
     "name": "Batch Operations / Manager",
     "description": "Modifiers, Materials, Groups management / batch operations",
     "author": "dairin0d, moth3r",
-    "version": (0, 4, 0),
+    "version": (0, 4, 1),
     "blender": (2, 7, 0),
     "location": "View3D > Batch category in Tools panel",
     "warning": "",
@@ -77,101 +77,9 @@ Make a general mechanism of serializing/deserializing links to ID blocks? (also 
 
 // add to addon "runtime" settings to hold python objects? (just for the convenience of accessing them from one place)
 
-
 investigate if it's possible to make a shortcut to jump to certain tab in tool shelf
 
-
-
-
-
-
-[DONE] use comma instead of semicolon in tooltips
-[DONE] "ensure" -> "assign to all"
-[DONE] restrict icons -> checkboxes (for everything than can be turned on/off)
-[DONE] remove "keep datablock/fake user" from quick access by default
-[DONE] rename "extra fake user" -> "Keep datablock(s)"; tooltip: += " (extra fake user)"
-[DONE] add option to switch between manual and auto refresh
-[DONE] make a preference for default selected or deselected state
-[DONE] take into account SpaceProperties.use_pin_id and SpaceProperties.pin_id
-
-// moth3r would rather have several explicit buttons than remember a lot of shortcuts
-
-[DONE] rename using a popup dialog? (might be less confusing than in-table renaming) (make it a preference?)
-
-[DONE] "rows selected by default": refresh UI when it's changed, or users will report it as a bug
-
-[DONE] move "filter mode" to the top of the options, and "paste mode" under it
-
-SELECTIONS:
-* [DONE] option: when something is selected, operations will be applied only to selected, but if nothing is selected, then filter is used
-    // previously considered as the "Afftect what" option ("Same as Filter", "Selection", "Visible", etc.) (icon: FILTER?) [This would probably complicate things too much]
-* [DONE] moth3r asks if it's possible to somehow visualize in non-Selection search_in, what items are actually in the selected
-* [DONE] Shift+click of (all) button -> invert selections (or select/deselect?) (make it a preference)
-* [DONE] option to synchronize object selection and table row selection
-* [with selection sync, not needed?] add mode for picker: clicking on object will select the rows in the table that correspond to this object (+Shift: select multiple)
-
-* [DONE] syncronization of batch options (show different icon when synchronized)
-    * [DONE] synchronized copy/paste? (e.g. copy/paste modifers and materials simultaneously)
-
-
-[DONE] category-specific action(s) on big name button? (choose any possible default action on Alt+click on name button)
-
-[DONE] new button for all assignment/replacement functions
-    on just click: popup menu with all functions
-    make options which functions are invoked on modifier+click
-    icon: for each category, use the corresponding icon (for now, use 'MODIFIER' for modifiers, even though it's used in "Apply (All)")
-
-
-globally as a UI option?
-
-add extra button for these modes (between replace and assign) for materials and groups ?
-* assign -> one slot (override)
-* assign -> same number (replace)
-* assign -> new slot (ensure)
-
-* [UNION] Make sure each object has the specified modifiers
-* [REPLACEMENT] Replace every instance of the specified modifier with a given modifier? (this probably makes no sense, though can be provided for consistency)
-* [INTERSECTION] Make sure each object has _only_ the specified modifiers (remove all other modifiers)
-* [OVERRIDE] Make sure each object _has_ the specified modifiers and _only_ them
-
-* [UNION] Make sure each object contains at least one instance of the specified materials
-    * option: {only reuse empty slots | only create new slots | create if cannot reuse}
-    * option: {switch slot to OBJECT | allow modifying the data}
-* [REPLACEMENT] Replace every instance of the specified materials with a given material
-    * option: {switch slot to OBJECT | allow modifying the data}
-* [INTERSECTION] Make sure each object contains only instances of the specified materials (unlink other materials) (sometimes if might be easier than manually removing all other materials)
-    * option: {switch slot to OBJECT | allow modifying the data}
-* [FILL] Make sure each object's slots are occupied by instances of the specified material
-    * option: {switch slot to OBJECT | allow modifying the data}
-* [FILL+UNION] Make sure each object _contains_ the specified material and _only_ it
-    * option: {switch slot to OBJECT | allow modifying the data}
-* [OVERRIDE] Replace each object's slots with one slot for each specified material
-    * option: {switch slot to OBJECT | allow modifying the data}
-
-* [UNION] Make sure each object is present in the specified groups
-* [REPLACEMENT] Replace every instance of the specified groups with a given group
-* [INTERSECTION] Make sure each object is present only in the specified groups (exclude from all other groups) (sometimes if might be easier than manually removing all other groups)
-* [OVERRIDE] Make sure each object _is_ in the specified groups and _only_ in them
-
-
-* Modifiers:
-    * [DONE] Apply Modifiers: apply_as='DATA' and/or 'SHAPE'?
-
-* Materials:
-    * option to remove unused material slots? (at least when material slot is removed from the UI, the following materials don't "shift indices")
-    * in edit mode, 'SELECTION' mode should be interpreted as mesh/etc. selection?
-    * Option "Affect data": can modify data materials or switch slot.link to OBJECT
-        * [DONE] if object's data has only 1 user, we can directly modify the data anyway
-    * option to override material slots or to preserve them
-    * Option "Reuse slots": when adding material, use unoccupied slots first, or always creating new ones
-    * [DONE] Merge identical: also compare Node trees, even though they are ID blocks. It seems like Blender forces a "each material has its own shader tree" situation, so one can't really use same shader tree for several materials?
-
-
-
-
 // seems like ANY menu/enum in panel header will have issues with background menus/enums (report a bug?)
-
-
 
 * Operators
     * Batch apply operator (search field)
@@ -189,6 +97,8 @@ add extra button for these modes (between replace and assign) for materials and 
     * copy/paste inside group? (in the selected batch groups)
     * for transforms: see Apply menu (rot/pos/scale, visual transform, make duplicates real?)
     * See also: https://github.com/sebastian-k/scripts/blob/master/power_snapping_pies.py (what of this is applicable to batch operations?)
+* Material slots?
+    ...
 * Constraints
     ...
 * Vertex Groups

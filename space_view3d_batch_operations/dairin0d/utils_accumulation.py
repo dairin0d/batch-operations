@@ -408,11 +408,12 @@ class Aggregator:
         if self._subseq and not (self._subseq_starts or self._subseq_ends):
             prev_subseq = self._subseq
             self._subseq = next(iter(longest_common_substring(self._subseq, value)), None) or value[0:0]
-            if self._subseq:
-                if self._startswith(prev_subseq, self._subseq):
-                    self._subseq_starts = self._startswith(value, self._subseq)
-                if self._endswith(prev_subseq, self._subseq):
-                    self._subseq_ends = self._endswith(value, self._subseq)
+            # Seems like there is no other way than to check everuthing again
+            #if self._subseq:
+            #    if self._startswith(prev_subseq, self._subseq):
+            #        self._subseq_starts = self._startswith(value, self._subseq)
+            #    if self._endswith(prev_subseq, self._subseq):
+            #        self._subseq_ends = self._endswith(value, self._subseq)
 
 class VectorAggregator:
     def __init__(self, size, type, queries=None, covert=None):

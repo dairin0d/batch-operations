@@ -286,6 +286,8 @@ def Operator_Parent_To_Empty(self, context, event, idnames="", category_idnames=
         obj.use_slow_parent = False
         obj.matrix_world = m
     
+    old_empty_parents.discard(obj for obj, m in objs_matrices)
+    
     for old_parent in old_empty_parents:
         if old_parent.children: continue
         context.scene.objects.unlink(old_parent)

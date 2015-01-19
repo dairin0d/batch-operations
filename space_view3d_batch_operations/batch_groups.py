@@ -205,13 +205,6 @@ class BatchOperations:
                 cls.add_group_to_obj(obj, idname)
     
     @classmethod
-    def ensure(cls, active_obj, objects, idnames):
-        idnames = cls.split_idnames(idnames)
-        for obj in objects:
-            for idname in idnames.difference(cls.iter_names(obj)):
-                cls.add_group_to_obj(obj, idname)
-    
-    @classmethod
     def remove(cls, objects, idnames, from_file=False):
         cls.assign('REPLACE', None, objects, idnames, "", from_file)
     
@@ -303,7 +296,7 @@ class BatchOperations:
             duplicates.discard(best)
             src_idnames = idnames_separator.join(item.name for item in duplicates)
             dst_idname = best.name
-            cls.replace(None, src_idnames, dst_idname, from_file=True, purge=True)
+            cls.assign('REPLACE', None, None, src_idnames, dst_idname, from_file=True, purge=True)
     
     assign_mode_default = 'ADD'
     assign_mode_default1 = 'FILTER'

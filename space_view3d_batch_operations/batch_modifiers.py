@@ -159,29 +159,6 @@ class BatchOperations:
                 md = obj.modifiers.new(idname.capitalize(), idname)
     
     @classmethod
-    def ensure(cls, active_obj, objects, idnames):
-        idnames = cls.split_idnames(idnames)
-        
-        src = {}
-        if active_obj:
-            for md in active_obj.modifiers:
-                if md.type in idnames:
-                    src[md.type] = md
-        
-        for obj in objects:
-            missing_idnames = set(idnames)
-            for md in obj.modifiers:
-                if md.type in idnames:
-                    missing_idnames.discard(md.type)
-                    src_item = src.get(md.type)
-                    if src_item: copyattrs(src_item, md)
-            
-            for idname in missing_idnames:
-                md = obj.modifiers.new(idname.capitalize(), idname)
-                src_item = src.get(idname)
-                if src_item: copyattrs(src_item, md)
-    
-    @classmethod
     def apply(cls, objects, scene, idnames, options=(), apply_as='DATA'):
         idnames = cls.split_idnames(idnames)
         
