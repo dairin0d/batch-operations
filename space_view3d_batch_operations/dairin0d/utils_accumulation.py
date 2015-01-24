@@ -68,8 +68,8 @@ Vectors can have per-component statistics and "holistic" statistics (when compon
 """
 
 class Aggregator:
-    _count = None
-    _same = None
+    _count = 0
+    _same = True
     _prev = None
     
     _min = None
@@ -252,11 +252,11 @@ class Aggregator:
             startswith=self._startswith, endswith=self._endswith, convert=convert)
         
         if 'count' in queries:
-            reset_lines.append("self._count = None")
+            reset_lines.append("self._count = 0")
             init_lines.append("self._count = 1")
             add_lines.append("self._count += 1")
         if 'same' in queries:
-            reset_lines.append("self._same = None")
+            reset_lines.append("self._same = True")
             init_lines.append("self._same = True")
             add_lines.append("if self._same: self._same = (value == self._prev)")
         if 'prev' in queries:
@@ -408,7 +408,8 @@ class Aggregator:
         if self._subseq and not (self._subseq_starts or self._subseq_ends):
             prev_subseq = self._subseq
             self._subseq = next(iter(longest_common_substring(self._subseq, value)), None) or value[0:0]
-            # Seems like there is no other way than to check everuthing again
+            # Seems like there is no other way than to check everything again
+            # (e.g. Blue, Red, White -> "e" is common, but is wasn't on the end in "Red")
             #if self._subseq:
             #    if self._startswith(prev_subseq, self._subseq):
             #        self._subseq_starts = self._startswith(value, self._subseq)

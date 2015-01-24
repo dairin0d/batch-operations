@@ -111,6 +111,12 @@ class BatchOperations:
             yield ms.name
     
     @classmethod
+    def iter_scene_objs_idnames(cls, scene):
+        for obj in scene.objects:
+            for ms in obj.material_slots:
+                if ms.material: yield (obj, ms.name)
+    
+    @classmethod
     def enum_all(cls):
         for mat in bpy.data.materials:
             yield (mat.name, mat.name, mat.name)
@@ -345,8 +351,6 @@ class BatchOperations:
     def assign(cls, assign_mode, active_obj, objects, src_idnames, dst_idnames, from_file=False, purge=False):
         src_idnames = cls.split_idnames(src_idnames) # can be None
         dst_idnames = cls.split_idnames(dst_idnames)
-        
-        print((assign_mode, src_idnames, dst_idnames))
         
         # option: {switch slot to OBJECT | allow modifying the data}
         if assign_mode == 'ADD': # previously known as "Ensure"

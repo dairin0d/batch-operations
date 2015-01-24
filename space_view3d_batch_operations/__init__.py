@@ -19,7 +19,7 @@ bl_info = {
     "name": "Batch Operations / Manager",
     "description": "Modifiers, Materials, Groups management / batch operations",
     "author": "dairin0d, moth3r",
-    "version": (0, 4, 1),
+    "version": (0, 5, 0),
     "blender": (2, 7, 0),
     "location": "View3D > Batch category in Tools panel",
     "warning": "",
@@ -35,6 +35,7 @@ if "dairin0d" in locals():
     imp.reload(batch_modifiers)
     imp.reload(batch_materials)
     imp.reload(batch_groups)
+    #imp.reload(batch_transform)
 
 import bpy
 
@@ -61,6 +62,7 @@ from .batch_common import copyattrs, attrs_to_dict, dict_to_attrs, Pick_Base, Le
 from . import batch_modifiers
 from . import batch_materials
 from . import batch_groups
+#from . import batch_transform
 
 addon = AddonManager()
 
@@ -81,10 +83,16 @@ investigate if it's possible to make a shortcut to jump to certain tab in tool s
 
 // seems like ANY menu/enum in panel header will have issues with background menus/enums (report a bug?)
 
+
+make Batch Materials work in edit mode?
+
+select by some attribute (e.g. by vertex group or mesh datablock)
+
 * Operators
     * Batch apply operator (search field)
     * operator's draw (if not defined, use automatic draw)
     * For: selection, visible, layer, scene, .blend
+    * [DONE] Repeat last N actions
 * Object/Transform
     * Batch rename with some sort of name pattern detection
     * Transform summary + ability to modify if possible
@@ -101,11 +109,28 @@ investigate if it's possible to make a shortcut to jump to certain tab in tool s
     ...
 * Constraints
     ...
-* Vertex Groups
-    * (moth3r asks) remove unused groups
-    ...
+* Mesh layers
+    * Notes:
+        * different objects may have similarly different layers which mean different things in each case, so unless the user
+          has taken the measures to name each layer properly, displaying a table of layer names won't help the user
+          understand what each layer is responsible for.
+        * copying/assigning layers is possible only between identical geometry
+        * basically, the only batch operation that makes sense for default-named layers of inhomogenous data is "Remove"
+    * Vertex Groups (also applicable to Lattice) - stored in object
+    * Shape keys (also applicable to Lattice and Curve/Surface)
+    * UV maps
+    * Vertex colors
+    * Custom layers
 * Layers?
     * see also: Layer Management addon by Bastien Montagne
+* Data?
+    * replace/override some datas with another data (data type must be same)
+    * some data-specific properties?
+    * no add, no paste modes, no remove (? or remove the objects?), no "add"/"filter" assign actions
+* Objects?
+    * aggregate by object types?
+    * batch convert object type?
+
 """
 
 #============================================================================#
@@ -181,6 +206,7 @@ class ThisAddonPreferences:
             active_options.autorefresh = src_options.autorefresh
             active_options.paste_mode = src_options.paste_mode
             active_options.search_in = src_options.search_in
+            active_options.aggregate_mode = src_options.aggregate_mode
         
         cls.sync_lock = False
         return True
@@ -200,6 +226,7 @@ class ThisAddonPreferences:
                 options.autorefresh = active_options.autorefresh
                 options.paste_mode = active_options.paste_mode
                 options.search_in = active_options.search_in
+                options.aggregate_mode = active_options.aggregate_mode
         
         cls.sync_lock = False
         return True

@@ -94,6 +94,13 @@ class BatchOperations:
             if obj.name in group.objects: yield group.name
     
     @classmethod
+    def iter_scene_objs_idnames(cls, scene):
+        scene_objects = set(scene.objects)
+        for group in bpy.data.groups:
+            for obj in group.objects:
+                if obj in scene_objects: yield (obj, group.name)
+    
+    @classmethod
     def enum_all(cls):
         for group in bpy.data.groups:
             yield (group.name, group.name, group.name)

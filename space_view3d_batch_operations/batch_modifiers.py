@@ -79,6 +79,12 @@ class BatchOperations:
         for md in obj.modifiers: yield md.type
     
     @classmethod
+    def iter_scene_objs_idnames(cls, scene):
+        for obj in scene.objects:
+            for md in obj.modifiers:
+                yield (obj, md.type)
+    
+    @classmethod
     def enum_all(cls):
         yield from cls._all_types_enum
     

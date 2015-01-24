@@ -272,20 +272,21 @@ class MeshCache:
         
         tmp_obj = bpy.data.objects.new(tmp_name, mesh)
         
-        tmp_obj.matrix_world = src_obj.matrix_world
-        
-        # This is necessary for correct bbox display # TODO
-        # (though it'd be better to change the logic in the raycasting)
-        tmp_obj.show_x_ray = src_obj.show_x_ray
-        
-        tmp_obj.dupli_faces_scale = src_obj.dupli_faces_scale
-        tmp_obj.dupli_frames_end = src_obj.dupli_frames_end
-        tmp_obj.dupli_frames_off = src_obj.dupli_frames_off
-        tmp_obj.dupli_frames_on = src_obj.dupli_frames_on
-        tmp_obj.dupli_frames_start = src_obj.dupli_frames_start
-        tmp_obj.dupli_group = src_obj.dupli_group
-        #tmp_obj.dupli_list = src_obj.dupli_list
-        tmp_obj.dupli_type = src_obj.dupli_type
+        if src_obj:
+            tmp_obj.matrix_world = src_obj.matrix_world
+            
+            # This is necessary for correct bbox display # TODO
+            # (though it'd be better to change the logic in the raycasting)
+            tmp_obj.show_x_ray = src_obj.show_x_ray
+            
+            tmp_obj.dupli_faces_scale = src_obj.dupli_faces_scale
+            tmp_obj.dupli_frames_end = src_obj.dupli_frames_end
+            tmp_obj.dupli_frames_off = src_obj.dupli_frames_off
+            tmp_obj.dupli_frames_on = src_obj.dupli_frames_on
+            tmp_obj.dupli_frames_start = src_obj.dupli_frames_start
+            tmp_obj.dupli_group = src_obj.dupli_group
+            #tmp_obj.dupli_list = src_obj.dupli_list
+            tmp_obj.dupli_type = src_obj.dupli_type
         
         # Make Blender recognize object as having geometry
         # (is there a simpler way to do this?)
@@ -299,10 +300,11 @@ class MeshCache:
 # =============================== SELECTION ================================ #
 #============================================================================#
 class Selection:
-    def __init__(self, context=None, mode=None, elem_types=None, container=set):
+    def __init__(self, context=None, mode=None, elem_types=None, container=set, brute_force_update=False):
         self.context = context
         self.mode = mode
         self.elem_types = elem_types
+        self.brute_force_update = brute_force_update
         # In some cases, user might want a hashable type (e.g. frozenset or tuple)
         self.container = container
         # We MUST keep reference to bmesh, or it will be garbage-collected
@@ -321,6 +323,12 @@ class Selection:
     @property
     def normalized_mode(self):
         return self.get_context()[-1]
+    
+    @property
+    def stateless_info(self):
+        history, active, total = next(self.walk(), (None,None,0))
+        active_id = active.name if hasattr(active, "name") else hash(active)
+        return (total, active_id)
     
     @property
     def active(self):
@@ -765,7 +773,10 @@ class Selection:
         expr_info = (operation, new_toggled, invert_new, old_toggled, invert_old)
         
         is_actual_mode = (mode == actual_mode)
-        select_all_action, data = self.__update_strategy(is_actual_mode, data, expr_info)
+        if self.brute_force_update:
+            select_all_action = None
+        else:
+            select_all_action, data = self.__update_strategy(is_actual_mode, data, expr_info)
         #print("Strategy: action={}, data={}".format(repr(select_all_action), bool(data)))
         use_brute_force = select_all_action is None
         
@@ -870,15 +881,17 @@ class Selection:
             pass # no selectable elements in other modes
 
 class SelectionSnapshot:
-    def __init__(self, context=None):
-        sel = Selection(context)
+    # The goal of SelectionSnapshot is to leave as little side-effects as possible,
+    # so brute_force_update=True (since select_all operators are recorded in the info log)
+    def __init__(self, context=None, brute_force_update=True):
+        sel = Selection(context, brute_force_update=brute_force_update)
         self.snapshot_curr = (sel, sel.active, sel.history, sel.selected)
         
         self.mode = sel.normalized_mode
         if self.mode == 'OBJECT':
             self.snapshot_obj = self.snapshot_curr
         else:
-            sel = Selection(context, 'OBJECT')
+            sel = Selection(context, 'OBJECT', brute_force_update=brute_force_update)
             self.snapshot_obj = (sel, sel.active, sel.history, sel.selected)
     
     # Attention: it is assumed that there was no Undo,
@@ -906,6 +919,30 @@ class SelectionSnapshot:
     
     def __exit__(self, type, value, traceback):
         self.restore()
+
+def IndividuallyActiveSelected(objects, context=None):
+    if context is None: context = bpy.context
+    
+    prev_selection = SelectionSnapshot(context)
+    sel, active, history, selected = prev_selection.snapshot_obj
+    
+    sel.selected = {}
+    
+    scene = context.scene
+    scene_objects = scene.objects
+    
+    for obj in objects:
+        try:
+            scene_objects.active = obj
+            obj.select = True
+        except Exception as exc:
+            continue # for some reason object doesn't exist anymore
+        
+        yield obj
+        
+        obj.select = False
+    
+    prev_selection.restore()
 
 # ============================ CHANGE MONITOR ============================== #
 #============================================================================#
@@ -961,17 +998,22 @@ class ChangeMonitor:
             bpy.ops.info.report_copy(kwargs)
             if wm.clipboard: # something was selected
                 bpy.ops.info.select_all_toggle(kwargs) # something is selected: deselect all
+                #bpy.ops.info.reports_display_update(kwargs)
             bpy.ops.info.select_all_toggle(kwargs) # nothing is selected: select all
+            #bpy.ops.info.reports_display_update(kwargs)
             
             bpy.ops.info.report_copy(kwargs)
             reports = wm.clipboard.splitlines()
             
             bpy.ops.info.select_all_toggle(kwargs) # deselect everything
+            #bpy.ops.info.reports_display_update(kwargs)
             
             if len(reports) >= self.reports_cleanup_trigger:
                 for i in range(self.reports_cleanup_count):
                     bpy.ops.info.select_pick(kwargs, report_index=i)
+                    #bpy.ops.info.reports_display_update(kwargs)
                 bpy.ops.info.report_delete(kwargs)
+                #bpy.ops.info.reports_display_update(kwargs)
         except Exception as exc:
             #print(exc)
             reports = []

@@ -33,10 +33,10 @@ except ImportError:
 exec("""
 from {0}dairin0d.utils_view3d import SmartView3D
 from {0}dairin0d.utils_userinput import KeyMapUtils
-from {0}dairin0d.utils_ui import NestedLayout, tag_redraw
+from {0}dairin0d.utils_ui import NestedLayout, tag_redraw, find_ui_area, ui_context_under_coord
 from {0}dairin0d.bpy_inspect import prop, BlRna, BlEnums
 from {0}dairin0d.utils_accumulation import Aggregator, VectorAggregator
-from {0}dairin0d.utils_blender import ChangeMonitor
+from {0}dairin0d.utils_blender import ChangeMonitor, Selection, SelectionSnapshot, IndividuallyActiveSelected
 from {0}dairin0d.utils_addon import AddonManager
 
 """.format(dairin0d_location))
@@ -46,7 +46,7 @@ addon = AddonManager()
 idnames_separator = "\t"
 
 def round_to_bool(v):
-    return (v > 0.5) # bool(round(v))
+    return (False if v is None else (v > 0.5))
 
 def has_common_layers(obj, scene):
     return any(l0 and l1 for l0, l1 in zip(obj.layers, scene.layers))
@@ -187,6 +187,147 @@ def LeftRightPanel(cls=None, **kwargs):
 
 change_monitor = ChangeMonitor(update=False)
 
+#============================================================================#
+
+@addon.Operator(idname="object.batch_repeat_actions", options={'INTERNAL'}, label="Repeat action(s)", description="Repeat action(s) for selected objects")
+class Operator_batch_repeat_actions:
+    exclude_active = True | prop()
+    operations = [False] | prop()
+    max_shown_actions = 32
+    
+    @classmethod
+    def poll(cls, context):
+        return (context.mode == 'OBJECT')
+    
+    def invoke(self, context, event):
+        cls = self.__class__
+        
+        mouse_context = ui_context_under_coord(event.mouse_x, event.mouse_y)
+        info_context = find_ui_area('INFO')
+        context_override = info_context or mouse_context
+        
+        reports = []
+        if mouse_context:
+            if context_override and context_override.get("area"):
+                reports = change_monitor.get_reports(context, **context_override)
+        
+        self.operations.clear() # important!
+        cls.compiled = []
+        for i, report in enumerate(reversed(reports)):
+            try:
+                # unlike "exec", "single" prevents code without statements
+                cls.compiled.append(compile(report, filename="info reports", mode="single"))
+            except SyntaxError:
+                continue
+            
+            item = self.operations.add()
+            item.name = report
+            item.value = (i == 0)
+            
+            if len(cls.compiled) >= cls.max_shown_actions: break
+        
+        wm = context.window_manager
+        return wm.invoke_props_dialog(self)
+    
+    def execute(self, context):
+        cls = self.__class__
+        
+        compiled = cls.compiled
+        cls.compiled = None
+        
+        if not any(item.value for item in self.operations): return {'CANCELLED'}
+        
+        if self.exclude_active:
+            active_obj = context.active_object
+            selected_objs = tuple(obj for obj in context.selected_objects if obj != active_obj)
+        else:
+            selected_objs = tuple(context.selected_objects)
+        
+        bpy.ops.ed.undo_push(message="Batch Repeat")
+        
+        for obj in IndividuallyActiveSelected(selected_objs):
+            for i in range(len(self.operations)):
+                item = self.operations[i]
+                if not item.value: continue
+                code = compiled[i]
+                try:
+                    exec(code)
+                except Exception as exc:
+                    print("Trying to execute {} resulted in {}".format(item.name, exc))
+        
+        return {'FINISHED'}
+    
+    def cancel(self, context):
+        cls = self.__class__
+        cls.compiled = None
+    
+    def draw(self, context):
+        layout = NestedLayout(self.layout)
+        layout.prop(self, "exclude_active", text="Exclude active object")
+        with layout.column(True):
+            for item in self.operations:
+                layout.prop(item, "value", text=item.name, toggle=True)
+
+# For moth3r, until we have a more consistent solution
+@addon.Operator(idname="object.batch_clear_slots_and_layers", options={'REGISTER', 'UNDO'}, label="Clear slots/layers", description="Clear material slots & data layers")
+class Operator_batch_clear_slots_and_layers:
+    globally = False | prop("Clear in the whole file (instead of just in the selection)", "Globally")
+    clear_material_slots = True | prop("Clear material slots", "Clear material slots")
+    clear_vertex_groups = True | prop("Clear vertex groups", "Clear vertex groups")
+    clear_shape_keys = True | prop("Clear shape keys", "Clear shape keys")
+    clear_uv_maps = True | prop("Clear UV maps", "Clear UV maps")
+    clear_vertex_colors = True | prop("Clear vertex colors", "Clear vertex colors")
+    
+    def invoke(self, context, event):
+        wm = context.window_manager
+        return wm.invoke_props_dialog(self)
+    
+    def execute(self, context):
+        bpy.ops.ed.undo_push(message="Batch clear material slots/vertex groups")
+        
+        objects = (bpy.data.objects if self.globally else context.selected_objects)
+        
+        for obj in IndividuallyActiveSelected(objects):
+            if not obj.data: continue
+            data = obj.data
+            
+            if self.clear_material_slots and hasattr(data, "materials"):
+                data.materials.clear(True)
+            
+            if self.clear_vertex_groups and obj.vertex_groups:
+                obj.vertex_groups.clear()
+            
+            if self.clear_shape_keys and hasattr(data, "shape_keys"):
+                if data.shape_keys: bpy.ops.object.shape_key_remove(all=True)
+            
+            if obj.type == 'MESH':
+                if self.clear_uv_maps:
+                    while data.uv_layers:
+                        bpy.ops.mesh.uv_texture_remove()
+                
+                if self.clear_vertex_colors:
+                    while data.vertex_colors:
+                        data.vertex_colors.remove(data.vertex_colors[0])
+        
+        return {'FINISHED'}
+    
+    def draw(self, context):
+        layout = NestedLayout(self.layout)
+        layout.prop(self, "globally")
+        layout.prop(self, "clear_material_slots")
+        layout.prop(self, "clear_vertex_groups")
+        layout.prop(self, "clear_shape_keys")
+        layout.prop(self, "clear_uv_maps")
+        layout.prop(self, "clear_vertex_colors")
+
+@LeftRightPanel(idname="VIEW3D_PT_batch_operations", context="objectmode", space_type='VIEW_3D', category="Batch", label="Batch Operations")
+def Panel_Batch_Operations(self, context):
+    layout = NestedLayout(self.layout)
+    layout.operator("object.batch_repeat_actions")
+    layout.operator("object.batch_clear_slots_and_layers")
+
+#============================================================================#
+
 @addon.Operator(idname="object.batch_hide", options={'INTERNAL', 'REGISTER'}, label="Visibile", description="Restrict viewport visibility")
 def Operator_Hide(self, context, event, idnames="", state=False):
     if event is not None:
@@ -299,7 +440,7 @@ def Operator_Parent_To_Empty(self, context, event, idnames="", category_idnames=
     new_parent = bpy.data.objects.new(parent_name, None)
     new_parent.location = parent_pos
     new_parent.show_name = True
-    new_parent.show_x_ray = True
+    #new_parent.show_x_ray = True # X-ray disables SSAO, so probably not very useful
     context.scene.objects.link(new_parent)
     context.scene.update() # update to avoid glitches
     
@@ -538,7 +679,7 @@ def make_category(globalvars, idname_attr="name", **kwargs):
                     CategoryPG.rename_id = index # side-effects are enabled now
         else:
             bpy.ops.ed.undo_push(message="Batch Select {}".format(Category_Name_Plural))
-            BatchOperations.select(context, idnames)
+            BatchOperations.select(context, idnames or category.all_idnames)
         
         category.tag_refresh()
         return {'FINISHED'}
@@ -585,21 +726,24 @@ def make_category(globalvars, idname_attr="name", **kwargs):
     class CategoryOptionsPG(options_mixin):
         def update_synchronized(self, context):
             addon.preferences.sync_add(self, category_name_plural)
-        synchronized = False | prop("Synchronize options", "Synchronized", update=update_synchronized)
+        synchronized = True | prop("Synchronize options", "Synchronized", update=update_synchronized)
         
         def update(self, context):
             addon.preferences.sync_update(self, category_name_plural)
             category = get_category()
             category.tag_refresh()
         
-        synchronize_selection = False | prop("Synchronize object/row selections", "Synchronize selection", update=update)
+        synchronize_selection = True | prop("Synchronize object/row selections", "Synchronize selection", update=update)
         
         prioritize_selection = True | prop("Affect all objects in the filter only if nothing is selected", "Prioritize selection", update=update)
         
         autorefresh = True | prop("Auto-refresh", update=update)
         
+        aggregate_mode = 'mean' | prop("Toggle summary criterion", update=update, items=[('min', "All", "Display as 'On' only if all are 'On'"),
+            ('max', "Any", "Display as 'On' if at least one is 'On'"), ('mean', "Majority", "Display as 'On' if the majority is 'On'")])
+        
         paste_mode_icons = {'SET':'ROTACTIVE', 'OR':'ROTATECOLLECTION', 'AND':'ROTATECENTER'}
-        paste_mode = 'SET' | prop("Paste mode", update=update, items=[
+        paste_mode = 'OR' | prop("Paste mode", update=update, items=[
             ('SET', "Override", "Override objects' {}(s) with the copied ones".format(category_name), 'ROTACTIVE'),
             ('OR', "Add", "Add copied {}(s) to objects".format(category_name), 'ROTATECOLLECTION'),
             ('AND', "Filter", "Remove objects' {}(s) that are not among the copied".format(category_name), 'ROTATECENTER'),
@@ -607,7 +751,7 @@ def make_category(globalvars, idname_attr="name", **kwargs):
         
         search_in_icons = {'SELECTION':'RESTRICT_SELECT_OFF', 'VISIBLE':'RESTRICT_VIEW_OFF',
             'LAYER':'RENDERLAYERS', 'SCENE':'SCENE_DATA', 'FILE':'FILE_BLEND'}
-        search_in = 'SELECTION' | prop("Filter", update=update, items=[
+        search_in = 'FILE' | prop("Filter", update=update, items=[
             ('SELECTION', "Selection", "Display {}(s) of the selection".format(category_name), 'RESTRICT_SELECT_OFF'),
             ('VISIBLE', "Visible", "Display {}(s) of the visible objects".format(category_name), 'RESTRICT_VIEW_OFF'),
             ('LAYER', "Layer", "Display {}(s) of the objects in the visible layers".format(category_name), 'RENDERLAYERS'),
@@ -641,25 +785,35 @@ def make_category(globalvars, idname_attr="name", **kwargs):
     class AggregateInfo:
         idname_attr = None
         aggr_infos = {}
+        aggr_infos_objs = {}
         
         def __init__(self, idname, name):
             self.idname = idname
             self.name = name
             self.count = 0
+            self.obj_names = []
+            
             self.aggrs = {}
             for name, params in self.aggr_infos.items():
                 self.aggrs[name] = Aggregator(*params["init"])
+            
+            self.aggrs_obj = {}
+            for name, params in self.aggr_infos_objs.items():
+                self.aggrs_obj[name] = Aggregator(*params["init"])
         
-        def fill_item(self, item):
+        def fill_item(self, item, query):
             item.name = self.name
             item.idname = self.idname
             item.count = self.count
+            item.obj_names = idnames_separator.join(self.obj_names)
             for name, params in self.aggr_infos.items():
-                self.fill_aggr(item, name, *params["fill"])
+                self.fill_aggr(item, name, False, query, params.get("convert"))
+            for name, params in self.aggr_infos_objs.items():
+                self.fill_aggr(item, name, True, query, params.get("convert"))
             item.user_editable = True
         
-        def fill_aggr(self, item, name, query, convert=None):
-            aggr = self.aggrs[name]
+        def fill_aggr(self, item, name, from_obj, query, convert=None):
+            aggr = (self.aggrs_obj[name] if from_obj else self.aggrs[name])
             value = getattr(aggr, query)
             if convert is not None: value = convert(value)
             setattr(item, name, value)
@@ -668,10 +822,25 @@ def make_category(globalvars, idname_attr="name", **kwargs):
         @classmethod
         def collect_info(cls, items, count_users=False):
             infos = {}
+            
             for item in items:
                 cls.extract_info(infos, item, "", count_users=count_users)
                 cls.extract_info(infos, item, count_users=count_users)
+            
+            for obj, idname in BatchOperations.iter_scene_objs_idnames(bpy.context.scene):
+                cls.extract_info_obj(infos, obj, "")
+                cls.extract_info_obj(infos, obj, idname)
+            
             return infos
+        
+        @classmethod
+        def extract_info_obj(cls, infos, obj, idname):
+            info = infos[idname]
+            info.obj_names.append(obj.name)
+            for name, params in cls.aggr_infos_objs.items():
+                value = getattr(obj, name)
+                if params.get("invert", False): value = not value
+                info.aggrs_obj[name].add(value)
         
         @classmethod
         def extract_info(cls, infos, item, idname=None, count_users=False):
@@ -690,8 +859,10 @@ def make_category(globalvars, idname_attr="name", **kwargs):
             else:
                 info.count += 1
             
-            for name in cls.aggr_infos:
-                info.aggrs[name].add(getattr(item, name))
+            for name, params in cls.aggr_infos.items():
+                value = getattr(item, name)
+                if params.get("invert", False): value = not value
+                info.aggrs[name].add(value)
     
     @addon.PropertyGroup
     class CategoryItemPG:
@@ -699,33 +870,69 @@ def make_category(globalvars, idname_attr="name", **kwargs):
         user_editable = False | prop()
         count = 0 | prop()
         idname = "" | prop()
+        obj_names = "" | prop()
     
     AggregateInfo.idname_attr = idname_attr
     
-    def make_update(name):
+    def make_update(name, from_obj, invert=False):
         def update(self, context):
             if not self.user_editable: return
             category = get_category()
             options = get_options()
             message = self.bl_rna.properties[name].description
             value = getattr(self, name)
+            if invert and isinstance(value, bool): value = not value
             bpy.ops.ed.undo_push(message=message)
-            idnames = self.idname or category.all_idnames
-            BatchOperations.set_attr(name, value, options.iterate_objects(context), idnames)
+            if from_obj:
+                for idname in self.obj_names.split(idnames_separator):
+                    obj = context.scene.objects.get(idname)
+                    if obj: setattr(obj, name, value)
+            else:
+                idnames = self.idname or category.all_idnames
+                BatchOperations.set_attr(name, value, options.iterate_objects(context), idnames)
             category.tag_refresh()
         return update
     
     if is_ID:
         aggregate_attrs.append(("use_fake_user", dict(tooltip="Keep this datablock even if it has no users (adds an extra fake user)")))
         _nongeneric_actions.append(("aggregate_toggle", dict(property="use_fake_user", text="Keep datablock(s)", icons=('PINNED', 'UNPINNED'))))
+    
     _nongeneric_actions.append(("operator", dict(operator="object.batch_{}_assign".format(category_name), text="Assign Action", icon=category_icon)))
     quick_access_default.add("object.batch_{}_assign".format(category_name))
+    
+    aggregate_attrs.append(("hide", dict(tooltip="Restrict viewport visibility", from_obj=True, invert=True)))
+    _nongeneric_actions.append(("aggregate_toggle", dict(property="hide", text="Visibile", icons=('RESTRICT_VIEW_OFF', 'RESTRICT_VIEW_ON'), from_obj=True, after_name=True)))
+    quick_access_default.add("hide")
+    
+    aggregate_attrs.append(("hide_select", dict(tooltip="Restrict viewport selection", from_obj=True, invert=True)))
+    _nongeneric_actions.append(("aggregate_toggle", dict(property="hide_select", text="Selectable", icons=('RESTRICT_SELECT_OFF', 'RESTRICT_SELECT_ON'), from_obj=True, after_name=True)))
+    quick_access_default.add("hide_select")
+    
+    aggregate_attrs.append(("hide_render", dict(tooltip="Restrict rendering", from_obj=True, invert=True)))
+    _nongeneric_actions.append(("aggregate_toggle", dict(property="hide_render", text="Renderable", icons=('RESTRICT_RENDER_OFF', 'RESTRICT_RENDER_ON'), from_obj=True, after_name=True)))
+    quick_access_default.add("hide_render")
+    
+    _nongeneric_actions.append(("operator", dict(operator="object.batch_set_layers", text="Set layers", icon='RENDERLAYERS', from_obj=True, after_name=True)))
+    
+    _nongeneric_actions.append(("operator", dict(operator="object.batch_parent_to_empty", text="Parent To Empty", icon='OUTLINER_OB_EMPTY', from_obj=True, after_name=True))) # or 'OOPS' ?
+    
+    _nongeneric_actions.append(("operator", dict(operator="object.batch_{}_remove".format(category_name), text="Remove", icon='X', after_name=True, use_affect=True)))
+    quick_access_default.add("object.batch_{}_remove".format(category_name))
     
     quick_access_items = []
     nongeneric_actions = []
     nongeneric_actions_no_text = []
     
     for cmd, cmd_kwargs in _nongeneric_actions:
+        from_obj = cmd_kwargs.get("from_obj", False)
+        cmd_kwargs.pop("from_obj", None)
+        
+        after_name = cmd_kwargs.get("after_name", False)
+        cmd_kwargs.pop("after_name", None)
+        
+        use_affect = cmd_kwargs.get("use_affect", False)
+        cmd_kwargs.pop("use_affect", None)
+        
         if cmd == "operator":
             action_idname = cmd_kwargs.get("operator")
         else:
@@ -739,13 +946,16 @@ def make_category(globalvars, idname_attr="name", **kwargs):
             elif isinstance(icons, str): icons = (icons, icons)
             cmd_kwargs["icons"] = icons
         
-        nongeneric_actions.append((cmd, cmd_kwargs, action_idname))
+        nongeneric_actions.append((cmd, cmd_kwargs, action_idname, from_obj, use_affect, after_name))
         
         cmd_kwargs = dict(cmd_kwargs)
         cmd_kwargs["text"] = ""
-        nongeneric_actions_no_text.append((cmd, cmd_kwargs, action_idname))
+        nongeneric_actions_no_text.append((cmd, cmd_kwargs, action_idname, from_obj, use_affect, after_name))
     
     for name, params in aggregate_attrs:
+        from_obj = params.get("from_obj", False)
+        invert = params.get("invert", False)
+        
         prop_kwargs = params.get("prop")
         if prop_kwargs is None: prop_kwargs = {}
         if "default" not in prop_kwargs:
@@ -753,12 +963,17 @@ def make_category(globalvars, idname_attr="name", **kwargs):
         if "tooltip" in params:
             prop_kwargs["description"] = params["tooltip"]
         if "update" not in prop_kwargs:
-            prop_kwargs["update"] = params.get("update") or make_update(name)
+            prop_kwargs["update"] = params.get("update") or make_update(name, from_obj, invert)
         setattr(CategoryItemPG, name, None | prop(**prop_kwargs))
         
         aggr = params.get("aggr")
-        if aggr is None: aggr = dict(init=('BOOL', {"same", "mean"}), fill=("mean", round_to_bool))
-        AggregateInfo.aggr_infos[name] = aggr
+        if from_obj:
+            # The user is probably more interested in "is there something visible at all?"
+            if aggr is None: aggr = dict(init=('BOOL', {"same", "min", "max", "mean"}), convert=round_to_bool, invert=invert)
+            AggregateInfo.aggr_infos_objs[name] = aggr
+        else:
+            if aggr is None: aggr = dict(init=('BOOL', {"same", "min", "max", "mean"}), convert=round_to_bool, invert=invert)
+            AggregateInfo.aggr_infos[name] = aggr
     
     CategoryOptionsPG.quick_access = quick_access_default | prop("Quick access", "Quick access", items=quick_access_items)
     
@@ -766,6 +981,23 @@ def make_category(globalvars, idname_attr="name", **kwargs):
         icon = (icons[0] if getattr(item, property) else icons[1])
         with layout.row(True)(alert=not item[property+":same"]):
             layout.prop(item, property, icon=icon, text=text, toggle=True, emboss=emboss)
+    
+    def draw_toggle_or_action(layout, item, item_idnames, title, icon_novalue, cmd, cmd_kwargs, from_obj, emboss=True):
+        if cmd == "aggregate_toggle":
+            aggregate_toggle(layout, item, emboss=emboss, **cmd_kwargs)
+        elif cmd == "operator":
+            if "icon" in cmd_kwargs:
+                op = layout.operator(emboss=emboss, **cmd_kwargs)
+            else:
+                op = layout.operator(icon=icon_novalue, emboss=emboss, **cmd_kwargs)
+            
+            if from_obj:
+                op.idnames = item.obj_names
+                if hasattr(op, "category_idnames"): op.category_idnames = item_idnames
+            else:
+                op.idnames = item_idnames
+                op.index = item.sort_id
+                op.title = title
     
     @addon.PropertyGroup
     class CategoryPG:
@@ -894,7 +1126,7 @@ def make_category(globalvars, idname_attr="name", **kwargs):
             for i, key in enumerate(sorted(infos.keys())):
                 item = self.items.add()
                 item.sort_id = i
-                infos[key].fill_item(item)
+                infos[key].fill_item(item, options.aggregate_mode)
             
             processing_time = time.clock() - processing_time
             # Disable autorefresh if it takes too much time
@@ -939,18 +1171,11 @@ def make_category(globalvars, idname_attr="name", **kwargs):
                         op.index = item.sort_id
                         op.title = title
                         
-                        for cmd, cmd_kwargs, action_idname in nongeneric_actions_no_text:
+                        for cmd, cmd_kwargs, action_idname, from_obj, use_affect, after_name in nongeneric_actions_no_text:
+                            if after_name: continue
                             if action_idname not in options.quick_access: continue
-                            if cmd == "aggregate_toggle":
-                                aggregate_toggle(layout, item, emboss=emboss, **cmd_kwargs)
-                            elif cmd == "operator":
-                                if "icon" in cmd_kwargs:
-                                    op = layout.operator(emboss=emboss, **cmd_kwargs)
-                                else:
-                                    op = layout.operator(icon=icon_novalue, emboss=emboss, **cmd_kwargs)
-                                op.idnames = item.idname or all_idnames
-                                op.index = item.sort_id
-                                op.title = title
+                            with layout.row(True)(alert=use_affect and (not can_affect)):
+                                draw_toggle_or_action(layout, item, (item.idname or all_idnames), title, icon_novalue, cmd, cmd_kwargs, from_obj, emboss)
                         
                         if self.rename_id == item.sort_id:
                             layout.prop(self, "rename", text="", emboss=emboss)
@@ -961,10 +1186,18 @@ def make_category(globalvars, idname_attr="name", **kwargs):
                             op.idnames = item.idname or all_idnames
                             op.index = item.sort_id
                         
+                        for cmd, cmd_kwargs, action_idname, from_obj, use_affect, after_name in nongeneric_actions_no_text:
+                            if not after_name: continue
+                            if action_idname not in options.quick_access: continue
+                            with layout.row(True)(alert=use_affect and (not can_affect)):
+                                draw_toggle_or_action(layout, item, (item.idname or all_idnames), title, icon_novalue, cmd, cmd_kwargs, from_obj, emboss)
+                        
+                        """
                         with layout.row(True)(alert=not can_affect):
                             op = layout.operator("object.batch_{}_remove".format(category_name), text="", icon='X', emboss=emboss)
                             op.idnames = item.idname or all_idnames
                             op.index = item.sort_id
+                        """
     
     CategoryPG.Category_Name = Category_Name
     CategoryPG.CATEGORY_NAME = CATEGORY_NAME
@@ -985,6 +1218,7 @@ def make_category(globalvars, idname_attr="name", **kwargs):
         item = category.items[index]
         icon_novalue = BatchOperations.icon_kwargs(item.idname, False)["icon"]
         
+        """
         search_in = options.search_in
         if search_in == 'FILE': search_in = 'SCENE' # shouldn't affect other scenes here
         
@@ -1006,22 +1240,12 @@ def make_category(globalvars, idname_attr="name", **kwargs):
         is_hide = bool(aggr_hide.min)
         is_hide_select = bool(aggr_hide_select.min)
         is_hide_render = bool(aggr_hide_render.min)
+        """
         
         def draw_popup_menu(self, context):
             layout = NestedLayout(self.layout)
             
-            for cmd, cmd_kwargs, action_idname in nongeneric_actions:
-                if cmd == "aggregate_toggle":
-                    aggregate_toggle(layout, item, **cmd_kwargs)
-                elif cmd == "operator":
-                    if "icon" in cmd_kwargs:
-                        op = layout.operator(**cmd_kwargs)
-                    else:
-                        op = layout.operator(icon=icon_novalue, **cmd_kwargs)
-                    op.idnames = idnames
-                    op.index = item.sort_id
-                    op.title = title
-            
+            """
             #icon = ('RESTRICT_VIEW_ON' if is_hide else 'RESTRICT_VIEW_OFF')
             icon = ('CHECKBOX_DEHLT' if is_hide else 'CHECKBOX_HLT')
             op = layout.operator("object.batch_hide", icon=icon)
@@ -1039,13 +1263,19 @@ def make_category(globalvars, idname_attr="name", **kwargs):
             op = layout.operator("object.batch_hide_render", icon=icon)
             op.idnames = related_objs_idnames
             op.state = not is_hide_render
+            """
             
+            for cmd, cmd_kwargs, action_idname, from_obj, use_affect, after_name in nongeneric_actions:
+                draw_toggle_or_action(layout, item, idnames, title, icon_novalue, cmd, cmd_kwargs, from_obj)
+            
+            """
             op = layout.operator("object.batch_set_layers", icon='RENDERLAYERS')
             op.idnames = related_objs_idnames
             
             op = layout.operator("object.batch_parent_to_empty", icon='OUTLINER_OB_EMPTY') # or 'OOPS' ?
             op.idnames = related_objs_idnames
             op.category_idnames = idnames
+            """
         
         context.window_manager.popup_menu(draw_popup_menu, title="{} extras".format(title), icon='DOTSDOWN')
     
@@ -1090,13 +1320,15 @@ def make_category(globalvars, idname_attr="name", **kwargs):
         options = get_options()
         layout.menu("VIEW3D_MT_batch_{}_options_search_in".format(category_name_plural), icon='VIEWZOOM')
         layout.menu("VIEW3D_MT_batch_{}_options_paste_mode".format(category_name_plural), icon='PASTEDOWN')
+        layout.prop_menu_enum(options, "aggregate_mode", text="Summary mode", icon='INFO')
+        layout.prop_menu_enum(options, "quick_access", text="Quick access", icon='VISIBLE_IPO_ON')
+        layout.prop_menu_enum(options, "action_name_alt", text="Alt+Click on name", icon='HAND')
+        layout.prop_menu_enum(options, "action_assign_shift", text="Shift+Click on assign", icon='HAND')
+        layout.prop_menu_enum(options, "action_assign_alt", text="Alt+Click on assign", icon='HAND')
         layout.prop(options, "autorefresh", text="Auto refresh")
         layout.prop(options, "synchronized", text="Sync options")
         layout.prop(options, "synchronize_selection", text="Sync selection")
         layout.prop(options, "prioritize_selection", text="Affect selection")
-        layout.prop_menu_enum(options, "action_name_alt", text="Alt+Click on name", icon='HAND')
-        layout.prop_menu_enum(options, "action_assign_shift", text="Shift+Click on assign", icon='HAND')
-        layout.prop_menu_enum(options, "action_assign_alt", text="Alt+Click on assign", icon='HAND')
         for cmd, cmd_kwargs in menu_options_extra:
             getattr(layout, cmd)(**cmd_kwargs)
     

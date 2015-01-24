@@ -75,6 +75,13 @@ def matrix_LRS(L, R, S):
     m.translation = L
     return m
 
+def to_matrix4x4(orient, pos):
+    if not isinstance(orient, Matrix):
+        orient = orient.to_matrix()
+    m = orient.to_4x4()
+    m.translation = pos.to_3d()
+    return m
+
 def matrix_compose(*args):
     size = len(args)
     m = Matrix.Identity(size)
