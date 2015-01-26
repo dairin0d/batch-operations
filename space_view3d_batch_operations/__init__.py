@@ -19,7 +19,7 @@ bl_info = {
     "name": "Batch Operations / Manager",
     "description": "Modifiers, Materials, Groups management / batch operations",
     "author": "dairin0d, moth3r",
-    "version": (0, 5, 0),
+    "version": (0, 5, 1),
     "blender": (2, 7, 0),
     "location": "View3D > Batch category in Tools panel",
     "warning": "",
@@ -58,7 +58,7 @@ from {0}dairin0d.bpy_inspect import prop, BlRna
 from {0}dairin0d.utils_addon import AddonManager
 """.format(dairin0d_location))
 
-from .batch_common import copyattrs, attrs_to_dict, dict_to_attrs, Pick_Base, LeftRightPanel, change_monitor
+from .batch_common import copyattrs, attrs_to_dict, dict_to_attrs, Pick_Base, LeftRightPanel, change_monitor, after_register_callbacks
 from . import batch_modifiers
 from . import batch_materials
 from . import batch_groups
@@ -88,6 +88,10 @@ make Batch Materials work in edit mode?
 
 select by some attribute (e.g. by vertex group or mesh datablock)
 
+* moth3r:
+  I've done today some tests with my and other's people kitbash kits. It seems lot of them are problematic so I need to use a lot of different procedures like for mesh cleanup which blender has like: "delete loose duplicates etc. recalculate normals" Thx last one works in edit mode only but maybe we could have it working inside object mode for all faces. 
+  It would be so great if we could have a separate button on batch. operations panel for doing that. You could then choose via checkboxes which ones you'd like particularly to use on your objects.
+
 * Operators
     * Batch apply operator (search field)
     * operator's draw (if not defined, use automatic draw)
@@ -95,6 +99,7 @@ select by some attribute (e.g. by vertex group or mesh datablock)
     * [DONE] Repeat last N actions
 * Object/Transform
     * Batch rename with some sort of name pattern detection
+    * Set layers
     * Transform summary + ability to modify if possible
     * Coordinate systems?
     * Non-instant evaluation? Or, if determining the moment of change is possible, use instant evaluation?
@@ -131,6 +136,83 @@ select by some attribute (e.g. by vertex group or mesh datablock)
     * aggregate by object types?
     * batch convert object type?
 
+
+// see also MeshLint, PrintToolbox?
+// related: moth3r some time ago complained that MeshLint shows where the problems are, but it has no options to fix the issues. it would be cool to actually have such functionality
+* "Batch cleanup": should work also from object mode on multiple object (+option to convert to mesh); in Edit mode, it should work on selected or all if nothing is selected
+    Fix/Cleanup/Streamline:
+        Mesh/Clean up/Delete Loose
+        Mesh/Clean up/Degenerate Dissolve
+        Mesh/Clean up/Limited Dissolve
+        Mesh/Clean up/Split Non-Planar Faces
+        Mesh/Clean up/Fill Holes
+        Mesh/Vertices/Remove Doubles
+        Mesh/Faces/Beautify Faces
+        
+        Mesh/Sort Elements/View Z axis
+        Mesh/Sort Elements/View X axis
+        Mesh/Sort Elements/Cursor Distance
+        Mesh/Sort Elements/Material
+        Mesh/Sort Elements/Randomize
+        Mesh/Sort Elements/Reverse
+    
+    Normals:
+        Mesh/Normals/Realculate Outside
+        Mesh/Normals/Realculate Inside
+        Mesh/Normals/Flip Normals
+        Mesh/Faces/Flip Normals
+        Mesh/Faces/Shade Smooth
+        Mesh/Faces/Shade Flat
+        Mesh/Faces/Recalculate Normals
+    
+    Process:
+        Mesh/Snap to Symmetry
+        Mesh/Symmetrize
+        
+        Mesh/Faces/Intersect
+        Mesh/Faces/Wireframe
+        
+        Mesh/Faces/Poke faces
+        Mesh/Faces/Triangulate faces
+        Mesh/Faces/Tris to Quads
+        Mesh/Faces/Split by Edges
+        
+        Ngons to Quads (and triangles, if necessary)
+        Outer shell (intersect -> remove internal parts)
+
+Mesh/Sort Elements/View Z axis mesh.sort_elements(type='VIEW_ZAXIS')
+Mesh/Sort Elements/View X axis mesh.sort_elements(type='VIEW_XAXIS')
+Mesh/Sort Elements/Cursor Distance mesh.sort_elements(type='CURSOR_DISTANCE')
+Mesh/Sort Elements/Material mesh.sort_elements(type='MATERIAL')
+Mesh/Sort Elements/Randomize mesh.sort_elements(type='RANDOMIZE')
+Mesh/Sort Elements/Reverse mesh.sort_elements(type='REVERSE')
+
+Mesh/Snap to Symmetry mesh.symmetry_snap()
+Mesh/Symmetrize mesh.symmetrize()
+
+Mesh/Clean up/Delete Loose mesh.delete_loose()
+Mesh/Clean up/Degenerate Dissolve mesh.dissolve_degenerate()
+Mesh/Clean up/Limited Dissolve mesh.dissolve_limited()
+Mesh/Clean up/Split Non-Planar Faces mesh.vert_connect_nonplanar()
+Mesh/Clean up/Fill Holes mesh.fill_holes()
+
+Mesh/Normals/Realculate Outside mesh.normals_make_consistent(inside=False)
+Mesh/Normals/Realculate Inside mesh.normals_make_consistent(inside=True)
+Mesh/Normals/Flip Normals mesh.flip_normals()
+
+Mesh/Faces/Flip Normals mesh.flip_normals()
+Mesh/Faces/Beautify Faces mesh.beautify_fill()
+Mesh/Faces/Intersect mesh.intersect()
+Mesh/Faces/Wire Frame mesh.wireframe()
+Mesh/Faces/Poke faces mesh.poke()
+Mesh/Faces/Triangulate faces mesh.quads_convert_to_tris()
+Mesh/Faces/Tris to Quads mesh.tris_convert_to_quads()
+Mesh/Faces/Split by Edges mesh.face_split_by_edges()
+Mesh/Faces/Shade Smooth mesh.faces_shade_smooth()
+Mesh/Faces/Shade Flat mesh.faces_shade_flat()
+Mesh/Faces/Recalculate Normals mesh.normals_make_consistent()
+
+Mesh/Vertices/Remove Doubles mesh.remove_doubles()
 """
 
 #============================================================================#
@@ -356,11 +438,19 @@ def scene_update_post(scene):
         bpy.ops.wm.batch_changes_monitor('INVOKE_DEFAULT')
 '''
 
+@bpy.app.handlers.persistent
+def scene_update_post(scene):
+    if after_register_callbacks:
+        callbacks = tuple(after_register_callbacks)
+        after_register_callbacks.clear()
+        for callback in callbacks:
+            callback()
+
 def register():
     # I couldn't find a way to avoid the unpredictable crashes,
     # and some actions (like changing a material in material slot)
     # cannot be detected through the info log anyway.
-    #addon.handler_append("scene_update_post", scene_update_post)
+    addon.handler_append("scene_update_post", scene_update_post)
     
     addon.register()
     

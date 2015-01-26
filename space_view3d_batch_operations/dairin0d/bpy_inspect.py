@@ -248,8 +248,21 @@ class BlRna:
         "CollectionProperty":bpy.props.CollectionProperty,
     }
     
+    def __new__(cls, obj):
+        try:
+            return obj.bl_rna
+        except AttributeError:
+            pass
+        
+        try:
+            return obj.get_rna().bl_rna
+        except (AttributeError, TypeError, KeyError):
+            return None
+    
     @staticmethod
-    def to_bpy_prop(rna_prop):
+    def to_bpy_prop(obj, name=None):
+        rna_prop = (obj if name is None else BlRna(obj).properties[name])
+        
         type_id = rna_prop.rna_type.identifier
         bpy_prop = BlRna.rna_to_bpy.get(type_id)
         if not bpy_prop: return None
@@ -305,7 +318,7 @@ class BlRna:
     # returns a Vector, but its subtype is 'NONE')
     @staticmethod
     def is_default(value, obj, name=None):
-        rna_prop = (obj if name is None else obj.bl_rna.properties[name])
+        rna_prop = (obj if name is None else BlRna(obj).properties[name])
         type_id = rna_prop.rna_type.identifier
         if hasattr(rna_prop, "array_length"):
             if rna_prop.array_length == 0:
@@ -323,7 +336,7 @@ class BlRna:
     
     @staticmethod
     def get_default(obj, name=None):
-        rna_prop = (obj if name is None else obj.bl_rna.properties[name])
+        rna_prop = (obj if name is None else BlRna(obj).properties[name])
         type_id = rna_prop.rna_type.identifier
         if hasattr(rna_prop, "array_length"):
             if rna_prop.array_length == 0:
@@ -376,22 +389,26 @@ class BlRna:
     
     @staticmethod
     def reset(obj, ignore_default=False):
-        for name, rna_prop in BlRna.properties(obj):
-            if (not ignore_default) or (not BlRna.is_default(getattr(obj, name), rna_prop)):
-                setattr(obj, name, BlRna.get_default(rna_prop))
+        if hasattr(obj, "property_unset"): # method of bpy_struct
+            for name, rna_prop in BlRna.properties(obj):
+                obj.property_unset(name)
+        else:
+            for name, rna_prop in BlRna.properties(obj):
+                if (not ignore_default) or (not BlRna.is_default(getattr(obj, name), rna_prop)):
+                    setattr(obj, name, BlRna.get_default(rna_prop))
     
     @staticmethod
     def properties(obj):
         # first rna property item is always rna_type (?)
-        return obj.bl_rna.properties.items()[1:]
+        return BlRna(obj).properties.items()[1:]
     
     @staticmethod
     def functions(obj):
-        return obj.bl_rna.functions[funcname].items()
+        return BlRna(obj).functions[funcname].items()
     
     @staticmethod
     def parameters(obj, funcname):
-        return obj.bl_rna.functions[funcname].parameters.items()
+        return BlRna(obj).functions[funcname].parameters.items()
     
     @staticmethod
     def deserialize(obj, data, ignore_default=False, suppress_errors=False):
@@ -873,13 +890,25 @@ class BpyProp:
                     extra.extra_dict[k] = v
 
 class BpyOp:
-    def __init__(self, op):
+    def __new__(cls, op):
         if isinstance(op, str):
-            category_name, op_name = op.split(".")
-            category = getattr(bpy.ops, category_name)
-            op = getattr(category, op_name)
+            if "." not in op: op = op.replace("_OT_", ".").lower()
+            op_parts = op.split(".")
+            category = getattr(bpy.ops, op_parts[-2])
+            op = getattr(category, op_parts[-1])
+        
+        rna = BlRna(op)
+        
+        # This seems to be the most straightforward way
+        # to check if the operator actually exists
+        # (hasattr(category, name) always returns True)
+        if not rna: return None
+        
+        self = object.__new__(cls)
         
         self.op = op
+        self.poll = op.poll
+        self.rna = rna
         
         # For operators defined in Python, this is the class
         # that's declared in the corresponding addon module.
@@ -887,11 +916,7 @@ class BpyOp:
         # functions like draw().
         self.type = type(op.get_instance())
         
-        # Contains various information (investigate)
-        self.rna = op.get_rna()
-    
-    def prop_info(self, name):
-        return BpyProp(getattr(self.type, name))
+        return self
 
 # ===== PRIMITIVE ITEMS & PROP ===== #
 

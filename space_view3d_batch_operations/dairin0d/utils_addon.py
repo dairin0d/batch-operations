@@ -21,6 +21,7 @@ import json
 import time
 import random
 import inspect
+import sys
 
 import bpy
 
@@ -67,6 +68,9 @@ class AddonManager:
         self.classes = []
         self.objects = {}
         self.attributes = {}
+        self.delayed_type_extensions = []
+        self.on_register = []
+        self.on_unregister = []
         
         self._init_config_storages()
         
@@ -462,6 +466,11 @@ class AddonManager:
         if issubclass_safe(prop_info, bpy.types.PropertyGroup):
             prop_info = prop_info | prop()
         
+        if self.status == 'INITIALIZATION':
+            # bpy types can be extended only after the corresponding PropertyGroups have been registered
+            self.delayed_type_extensions.append((type_name, prop_name, prop_info, owner))
+            return
+        
         struct = getattr(bpy.types, type_name)
         setattr(struct, prop_name, prop_info)
         
@@ -627,13 +636,22 @@ class AddonManager:
         if BpyProp.is_in(self.Internal):
             self.type_extend("Screen", self.storage_name_internal, self.Internal)
         
+        for delayed_type_extension in self.delayed_type_extensions:
+            self.type_extend(*delayed_type_extension)
+        
         if load_config:
             self.external_load()
+        
+        for callback in self.on_register:
+            callback()
         
         self.status = 'REGISTERED'
     
     def unregister(self):
         self.status = 'UNREGISTRATION'
+        
+        for callback in self.on_unregister:
+            callback()
         
         self.attributes.clear()
         
@@ -1250,7 +1268,7 @@ def {0}({1}):
         
         return accum_prop(*args, **kwargs)
     
-    def _gen_idblock(self, cls, name=None, icon='DOT', sorted=False):
+    def _gen_idblock(self, cls, name=None, icon='DOT', sorted=False, show_empty=True):
         name = name or bpy.path.display_name(cls.__name__)
         
         # Make class a PropertyGroup, if it's not
@@ -1284,6 +1302,7 @@ def {0}({1}):
         class _IDBlockSelector(IDBlockSelector, bpy.types.PropertyGroup):
             _addon = self
             _IDBlock_type = cls
+        _IDBlockSelector.show_empty = show_empty
         
         def redescribe(attr_name, value):
             bp_type, bp_dict = getattr(_IDBlockSelector, attr_name)
@@ -1303,8 +1322,7 @@ def {0}({1}):
         
         return cls
     
-    # ID blocks are stored in collections which ensure unique name
-    # for each item
+    # ID blocks are stored in collections which ensure unique name for each item
     def IDBlock(self, cls=None, **kwargs):
         if cls:
             return self._gen_idblock(cls, **kwargs)
@@ -1342,8 +1360,7 @@ class IDBlocks:
         for listener in selfx._listeners:
             listener._on_rename(obj)
         
-        if selfx.lock:
-            return
+        if selfx.lock: return
         
         i_obj = -1
         i_ins = -1
@@ -1397,8 +1414,7 @@ class IDBlocks:
         
         obj = self.collection[i]
         
-        if hasattr(obj, "dispose"):
-            obj.dispose()
+        if hasattr(obj, "dispose"): obj.dispose()
         
         self.collection.remove(i)
         
@@ -1416,8 +1432,7 @@ class IDBlocks:
             listener._on_clear()
     
     def _swap(self, i0, i1):
-        if i0 == i1:
-            return
+        if i0 == i1: return
         
         selfx = self._addon[self]
         
@@ -1431,8 +1446,7 @@ class IDBlocks:
             listener._on_swap(i0, i1)
     
     def _move(self, i0, i1):
-        if i0 == i1:
-            return
+        if i0 == i1: return
         
         selfx = self._addon[self]
         
@@ -1444,8 +1458,7 @@ class IDBlocks:
     
     def _search(self, key, low=0, high=None):
         collection = self.collection
-        if high is None:
-            high = len(collection) - 1
+        if high is None: high = len(collection) - 1
         
         while low <= high:
             middle = (high + low) // 2
@@ -1504,20 +1517,16 @@ class IDBlocks:
         if isinstance(i, int):
             n = len(self.collection)
             
-            if i < 0:
-                i += n
+            if i < 0: i += n
             
             if (i < 0) or (i >= n):
-                if not err:
-                    return -1
-                raise IndexError("index %s is out of range [%s, %s]" %
-                    (i, 0, n - 1))
+                if not err: return -1
+                raise IndexError("index %s is out of range [%s, %s]" % (i, 0, n - 1))
         else:
             k = i
             i = self.find(i)
             if i == -1:
-                if not err:
-                    return -1
+                if not err: return -1
                 raise KeyError("item '%s' not in collection" % k)
         
         return i
@@ -1569,8 +1578,7 @@ class IDBlocks:
     def new(self, name="", **kwargs):
         selfx = self._addon[self]
         
-        if not name:
-            name = self._typename
+        if not name: name = self._typename
         
         name, i = self._unique_name(name)
         
@@ -1591,8 +1599,7 @@ class IDBlocks:
     
     def remove(self, obj):
         i = self.find(obj)
-        if i == -1:
-            raise ValueError("item not in collection")
+        if i == -1: raise ValueError("item not in collection")
         del self[i]
     
     def find(self, key_or_obj):
@@ -1643,11 +1650,9 @@ class IDBlocks:
                 setattr(collection[i], attr, seq[i])
     
     def get(self, key, default=None):
-        "Returns the value of the item assigned to key, or default "\
-        "(when key is not found)"
+        "Returns the value of the item assigned to key, or default (when key is not found)"
         i = self.find(key)
-        if i == -1:
-            return default
+        if i == -1: return default
         return self._ensure_link(self.collection[i])
     
     def items(self):
@@ -1692,22 +1697,19 @@ class IDBlocks:
     
     def discard(self, key_or_index):
         i = self._resolve_index(key_or_index, False)
-        if i != -1:
-            del self[i]
+        if i != -1: del self[i]
     
     def clear(self):
         self._clear()
     
     def move(self, key_or_index0, key_or_index1):
-        if self._sorted:
-            return
+        if self._sorted: return
         i0 = self._resolve_index(key_or_index0)
         i1 = self._resolve_index(key_or_index1)
         self._move(i0, i1)
     
     def swap(self, key_or_index0, key_or_index1):
-        if self._sorted:
-            return
+        if self._sorted: return
         i0 = self._resolve_index(key_or_index0)
         i1 = self._resolve_index(key_or_index1)
         self._swap(i0, i1)
@@ -1715,22 +1717,37 @@ class IDBlocks:
 class IDBlockSelector:
     def _selector_update(self, context):
         selfx = self._addon[self] # "self extended"
-        if selfx.lock:
-            return
+        if selfx.lock: return
         
         self._set_index(selfx, selfx.idblocks.find(self.selector))
     
     def _renamer_update(self, context):
         selfx = self._addon[self] # "self extended"
-        if selfx.lock:
-            return
+        if selfx.lock: return
         
         obj = selfx.idblocks[selfx.index]
         
         if obj.name != self.renamer:
             obj.name = self.renamer
     
-    selector = "" | prop(update=_selector_update)
+    use_search_field = False
+    
+    if use_search_field:
+        selector = "" | prop(update=_selector_update)
+    else:
+        #empty_name = '\x7f' # "Delete" character
+        empty_name = '\x1a' # "Substitute" character
+        def enum_items(self, context):
+            selfx = self._addon[self] # "self extended"
+            idblocks = selfx.idblocks
+            # references to items' strings must be kept in python!
+            selfx._item_names = [sys.intern(obj.name) for obj in idblocks.collection]
+            items = []
+            if self.show_empty or (not selfx._item_names): items.append((self.empty_name, "", ""))
+            if idblocks is not None: items.extend((name, name, name) for name in selfx._item_names)
+            return items
+        selector = empty_name | prop(update=_selector_update, items=enum_items)
+    
     renamer = "" | prop(update=_renamer_update)
     
     def __init__(self):
@@ -1743,6 +1760,7 @@ class IDBlockSelector:
         selfx.lock = PrimitiveLock()
         selfx.index = -1
         selfx.reselect = False
+        selfx.rename = True
     
     def unbind(self):
         selfx = self._addon[self] # "self extended"
@@ -1762,13 +1780,24 @@ class IDBlockSelector:
     
     def _set_index(self, selfx, i):
         # Necessary to avoid infinite loop/recursion
-        if selfx.lock:
-            return
+        if selfx.lock: return
         
         selfx.index = i
         name = ("" if i == -1 else selfx.idblocks[i].name)
         with selfx.lock:
-            self.selector = name
+            if self.use_search_field:
+                self.selector = name
+            else:
+                if name or self.empty_name:
+                    select_any = False
+                    try:
+                        self.selector = (name if name else self.empty_name)
+                    except:
+                        select_any = (not name) and (not self.show_empty)
+                    if select_any:
+                        idblocks = selfx.idblocks
+                        if idblocks and idblocks.collection:
+                            self.selector = idblocks.collection[len(idblocks.collection)-1].name
             self.renamer = name
     
     def set_update(self, update):
@@ -1776,19 +1805,19 @@ class IDBlockSelector:
         
         selfx.update = update
     
-    def bind(self, idblocks, new="", open="", delete="", reselect=False):
+    is_bound = property(lambda self: (self._addon[self].idblocks is not None))
+    
+    def bind(self, idblocks, new="", open="", delete="", reselect=False, rename=True):
         selfx = self._addon[self] # "self extended"
         
-        if selfx.idblocks:
-            selfx.idblocks._remove_listener(self)
+        if selfx.idblocks: selfx.idblocks._remove_listener(self)
         
         if isinstance(idblocks, IDBlocks):
             bp_type, bp_dict = type(idblocks).collection
             if bp_dict["type"] is self._IDBlock_type:
                 selfx.idblocks = idblocks
             else:
-                raise TypeError("idblocks item type must be %s" %
-                    self._IDBlock_type.__name__)
+                raise TypeError("idblocks item type must be %s" % self._IDBlock_type.__name__)
         else:
             raise TypeError("idblocks must be an IDBlocks instance")
         
@@ -1799,6 +1828,7 @@ class IDBlockSelector:
         selfx.delete = delete
         
         selfx.reselect = reselect
+        selfx.rename = rename
         
         self._set_index(selfx, selfx.idblocks.find(self.selector))
     
@@ -1818,8 +1848,7 @@ class IDBlockSelector:
     def delete(self):
         selfx = self._addon[self] # "self extended"
         
-        if selfx.index == -1:
-            return
+        if selfx.index == -1: return
         
         try:
             del selfx.idblocks[selfx.index]
@@ -1830,8 +1859,7 @@ class IDBlockSelector:
     def object(self):
         selfx = self._addon[self] # "self extended"
         
-        if not selfx.idblocks:
-            return None
+        if not selfx.idblocks: return None
         
         return selfx.idblocks[selfx.index]
     
@@ -1888,13 +1916,14 @@ class IDBlockSelector:
         selfx = self._addon[self] # "self extended"
         
         idblocks = selfx.idblocks
-        if idblocks is None:
-            return
+        if idblocks is None: return
         
         new = selfx.new
         open = selfx.open
         delete = selfx.delete
         index = selfx.index
+        
+        rename = selfx.rename
         
         name = idblocks._typename
         icon = idblocks._icon or 'DOT'
@@ -1904,35 +1933,44 @@ class IDBlockSelector:
         
         with layout.row(True):
             # ===== SELECTOR ===== #
-            if (index != -1) or (new or open):
+            if rename and ((index != -1) or (new or open)):
                 # magical values:
                 # alignment == 'EXPAND': scale_x = 0.12..0.13 (0.125)
                 # alignment != 'EXPAND': scale_x = 0.23..0.24 (0.235)
                 # ...at 0.125 some small letters like "i" can still be seen
-                layout.row(scale_x=0.12).prop_search(self, "selector",
-                    idblocks, "collection", text="", icon=icon)
+                if self.use_search_field:
+                    scale_x = 0.12
+                    with layout.row(True)(scale_x=scale_x):
+                        layout.prop_search(self, "selector", idblocks, "collection", text="", icon=icon)
+                else:
+                    scale_x = 0.16
+                    with layout.row(True)(scale_x=scale_x):
+                        layout.prop(self, "selector", text="", icon=icon)
+                        #layout.prop_menu_enum(self, "selector", text="", icon=icon)
             else:
-                layout.prop_search(self, "selector",
-                    idblocks, "collection", text="", icon=icon)
+                if self.use_search_field:
+                    layout.prop_search(self, "selector", idblocks, "collection", text="", icon=icon)
+                else:
+                    layout.prop(self, "selector", text="", icon=icon)
+                    #layout.prop_menu_enum(self, "selector", text="", icon=icon)
+            
+            # layout.prop_search since some version displays "Clear search field" button, which looks bad
+            # layout.prop_menu_enum seems buggy in this particular use case
+            # layout.prop does not seem have as severe drawbacks as other layout commands
             
             if index == -1:
-                if new:
-                    layout.operator(new, "New", 'ZOOMIN')
+                if new: layout.operator(new, text="New", icon='ZOOMIN')
                 
-                if open:
-                    layout.operator(open, "Open", 'FILESEL')
+                if open: layout.operator(open, text="Open", icon='FILESEL')
             else:
                 # ===== RENAMER ===== #
-                layout.row().prop(self, "renamer", text="")
+                if rename: layout.prop(self, "renamer", text="")
                 
                 # ===== New, Open, Delete (unlink) ===== #
-                if new:
-                    layout.operator(new, "", 'ZOOMIN')
+                if new: layout.operator(new, text="", icon='ZOOMIN')
                 
-                if open:
-                    layout.operator(open, "", 'FILESEL')
+                if open: layout.operator(open, text="", icon='FILESEL')
                 
-                if delete:
-                    layout.operator(delete, "", 'X')
+                if delete: layout.operator(delete, text="", icon='X')
 
 #============================================================================#

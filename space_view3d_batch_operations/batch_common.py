@@ -34,7 +34,7 @@ exec("""
 from {0}dairin0d.utils_view3d import SmartView3D
 from {0}dairin0d.utils_userinput import KeyMapUtils
 from {0}dairin0d.utils_ui import NestedLayout, tag_redraw, find_ui_area, ui_context_under_coord
-from {0}dairin0d.bpy_inspect import prop, BlRna, BlEnums
+from {0}dairin0d.bpy_inspect import prop, BlRna, BlEnums, BpyOp
 from {0}dairin0d.utils_accumulation import Aggregator, VectorAggregator
 from {0}dairin0d.utils_blender import ChangeMonitor, Selection, SelectionSnapshot, IndividuallyActiveSelected
 from {0}dairin0d.utils_addon import AddonManager
@@ -42,6 +42,8 @@ from {0}dairin0d.utils_addon import AddonManager
 """.format(dairin0d_location))
 
 addon = AddonManager()
+
+after_register_callbacks = []
 
 idnames_separator = "\t"
 
@@ -268,7 +270,6 @@ class Operator_batch_repeat_actions:
             for item in self.operations:
                 layout.prop(item, "value", text=item.name, toggle=True)
 
-# For moth3r, until we have a more consistent solution
 @addon.Operator(idname="object.batch_clear_slots_and_layers", options={'REGISTER', 'UNDO'}, label="Clear slots/layers", description="Clear material slots & data layers")
 class Operator_batch_clear_slots_and_layers:
     globally = False | prop("Clear in the whole file (instead of just in the selection)", "Globally")
@@ -277,6 +278,10 @@ class Operator_batch_clear_slots_and_layers:
     clear_shape_keys = True | prop("Clear shape keys", "Clear shape keys")
     clear_uv_maps = True | prop("Clear UV maps", "Clear UV maps")
     clear_vertex_colors = True | prop("Clear vertex colors", "Clear vertex colors")
+    
+    @classmethod
+    def poll(cls, context):
+        return (context.mode == 'OBJECT')
     
     def invoke(self, context, event):
         wm = context.window_manager
@@ -320,11 +325,408 @@ class Operator_batch_clear_slots_and_layers:
         layout.prop(self, "clear_uv_maps")
         layout.prop(self, "clear_vertex_colors")
 
-@LeftRightPanel(idname="VIEW3D_PT_batch_operations", context="objectmode", space_type='VIEW_3D', category="Batch", label="Batch Operations")
+@addon.Operator(idname="object.batch_streamline_meshes", options={'REGISTER', 'UNDO'}, label="Streamline mesh(es)", description="Streamline mesh(es)")
+class Operator_batch_streamline_meshes:
+    globally = False | prop("Apply to all objects (instead of just in the selection)", "Globally")
+    convert_to_mesh = False | prop("Convert non-meshes to meshes", "Convert to mesh(es)")
+    
+    # see also MeshLint, PrintToolbox?
+    # TODO (low priority): after operator is performed, show statistics of what modifications were actually done (e.g. removed N vertices, etc., etc.)
+    
+    # Symmetry
+    symmetry_snap = False | prop("Snap vertex pairs to their mirrored locations", "Snap to symmetry")
+    symmetry_snap_direction = BlRna.to_bpy_prop(bpy.ops.mesh.symmetry_snap, "direction")
+    symmetry_snap_threshold = BlRna.to_bpy_prop(bpy.ops.mesh.symmetry_snap, "threshold")
+    symmetry_snap_factor = BlRna.to_bpy_prop(bpy.ops.mesh.symmetry_snap, "factor")
+    symmetry_snap_use_center = BlRna.to_bpy_prop(bpy.ops.mesh.symmetry_snap, "use_center")
+    
+    symmetrize = False | prop("Enforce a symmetry (both form and topological) across an axis", "Symmetrize")
+    symmetrize_direction = BlRna.to_bpy_prop(bpy.ops.mesh.symmetrize, "direction")
+    symmetrize_threshold = BlRna.to_bpy_prop(bpy.ops.mesh.symmetrize, "threshold")
+    
+    # Fix degenerate geometry
+    dissolve_degenerate = False | prop("Dissolve zero area faces and zero length edges", "Dissolve degenerate")
+    dissolve_degenerate_threshold = BlRna.to_bpy_prop(bpy.ops.mesh.dissolve_degenerate, "threshold")
+    
+    remove_doubles = False | prop("Remove duplicate vertices", "Remove doubles")
+    remove_doubles_threshold = BlRna.to_bpy_prop(bpy.ops.mesh.remove_doubles, "threshold")
+    remove_doubles_use_unselected = BlRna.to_bpy_prop(bpy.ops.mesh.remove_doubles, "use_unselected")
+    
+    face_split_by_edges = False | prop("Split faces by loose edges", "Split by edges")
+    
+    beautify_fill = False | prop("Rearrange some faces to try to get less degenerate geometry", "Beautify faces")
+    beautify_fill_angle_limit = BlRna.to_bpy_prop(bpy.ops.mesh.beautify_fill, "angle_limit")
+    
+    # Fix topology
+    fill_holes = False | prop("Fill in holes (boundary edge loops)", "Fill holes")
+    fill_holes_sides = BlRna.to_bpy_prop(bpy.ops.mesh.fill_holes, "sides")
+    
+    intersect = False | prop("Cut an intersection into faces", "Intersect")
+    if BpyOp("mesh.intersect"):
+        intersect_mode = BlRna.to_bpy_prop(bpy.ops.mesh.intersect, "mode") | prop(default='SELECT')
+        intersect_use_separate = BlRna.to_bpy_prop(bpy.ops.mesh.intersect, "use_separate")
+        intersect_threshold = BlRna.to_bpy_prop(bpy.ops.mesh.intersect, "threshold") | prop(name="Merge Distance")
+    else:
+        intersect_mode = 'SELECT' | prop(items=[('SELECT_UNSELECT', "Selected/Unselected"), ('SELECT', "Self intersect")])
+        intersect_use_separate = False | prop(name="Separate")
+        intersect_threshold = 1e-6 | prop(name="Merge Distance")
+    
+    normals = False | prop("Recalculate normals", "Recalculate normals")
+    normals_type = 'OUTSIDE' | prop("Recalculate normals", items=[
+        ('OUTSIDE', "Outside"),
+        ('INSIDE', "Inside"),
+        ('FLIP', "Flip"),
+    ])
+    
+    #Outer shell (intersect -> remove internal parts) ? (not in Blender)
+    
+    # Delete loose geometry
+    delete_loose = False | prop("Delete loose vertices/edges/faces", "Delete loose")
+    delete_loose_use_verts = True | prop("Vertices", "Vertices")
+    delete_loose_use_edges = True | prop("Edges", "Edges")
+    delete_loose_use_faces = False | prop("Faces", "Faces")
+    
+    # Flatness/smoothness/planarity/curvature
+    dissolve_limited = False | prop("Dissolve edges/verts, limited by angle of surrounding geometry", "Dissolve by angle")
+    dissolve_limited_angle_limit = BlRna.to_bpy_prop(bpy.ops.mesh.dissolve_limited, "angle_limit")
+    dissolve_limited_use_dissolve_boundaries = BlRna.to_bpy_prop(bpy.ops.mesh.dissolve_limited, "use_dissolve_boundaries")
+    dissolve_limited_delimit = BlRna.to_bpy_prop(bpy.ops.mesh.dissolve_limited, "delimit")
+    
+    vert_connect_nonplanar = False | prop("Split non-planar faces that exceed the angle threshold", "Split non-planar faces")
+    vert_connect_nonplanar_angle_limit = BlRna.to_bpy_prop(bpy.ops.mesh.vert_connect_nonplanar, "angle_limit")
+    
+    shade = False | prop("Face shade", "Face shade")
+    shade_type = 'SMOOTH' | prop("Face shade", items=[
+        ('SMOOTH', "Smooth"),
+        ('FLAT', "Flat"),
+    ])
+    
+    # Tris/Quads
+    quads_convert_to_tris = False | prop("Triangulate faces", "Triangulate faces")
+    quads_convert_to_tris_quad_method = BlRna.to_bpy_prop(bpy.ops.mesh.quads_convert_to_tris, "quad_method")
+    quads_convert_to_tris_ngon_method = BlRna.to_bpy_prop(bpy.ops.mesh.quads_convert_to_tris, "ngon_method")
+    
+    tris_convert_to_quads = False | prop("Join triangles into quads", "Tris to quads")
+    tris_convert_to_quads_limit = BlRna.to_bpy_prop(bpy.ops.mesh.tris_convert_to_quads, "limit")
+    tris_convert_to_quads_uvs = BlRna.to_bpy_prop(bpy.ops.mesh.tris_convert_to_quads, "uvs")
+    tris_convert_to_quads_vcols = BlRna.to_bpy_prop(bpy.ops.mesh.tris_convert_to_quads, "vcols")
+    tris_convert_to_quads_sharp = BlRna.to_bpy_prop(bpy.ops.mesh.tris_convert_to_quads, "sharp")
+    tris_convert_to_quads_materials = BlRna.to_bpy_prop(bpy.ops.mesh.tris_convert_to_quads, "materials")
+    
+    poke = False | prop("Split faces into fans", "Poke faces")
+    poke_offset = BlRna.to_bpy_prop(bpy.ops.mesh.poke, "offset")
+    poke_use_relative_offset = BlRna.to_bpy_prop(bpy.ops.mesh.poke, "use_relative_offset")
+    poke_center_mode = BlRna.to_bpy_prop(bpy.ops.mesh.poke, "center_mode")
+    
+    # Sorting
+    sort = False | prop("Sort", "Sort")
+    sort_type = BlRna.to_bpy_prop(bpy.ops.mesh.sort_elements, "type")
+    sort_verts = True | prop("Vertices", "Vertices")
+    sort_edges = False | prop("Edges", "Edges")
+    sort_faces = False | prop("Faces", "Faces")
+    sort_reverse = BlRna.to_bpy_prop(bpy.ops.mesh.sort_elements, "reverse")
+    
+    def draw(self, context):
+        layout = NestedLayout(self.layout)
+        
+        with layout.row()(alignment='LEFT'):
+            layout.prop(self, "globally")
+            layout.prop(self, "convert_to_mesh")
+        
+        with layout.column():
+            layout.label("Symmetry")
+            with layout.split(0.25):
+                with layout.column(True):
+                    layout.prop(self, "symmetry_snap", toggle=True)
+                    layout.prop(self, "symmetrize", toggle=True)
+                with layout.column(True):
+                    with layout.row()(alignment='LEFT'):
+                        layout.prop(self, "symmetry_snap_direction", text="")
+                        layout.prop(self, "symmetry_snap_threshold")
+                        layout.prop(self, "symmetry_snap_factor")
+                        layout.prop(self, "symmetry_snap_use_center")
+                    with layout.row()(alignment='LEFT'):
+                        layout.prop(self, "symmetrize_direction", text="")
+                        layout.prop(self, "symmetrize_threshold")
+            
+            layout.label("Degenerate")
+            with layout.split(0.25):
+                with layout.column(True):
+                    layout.prop(self, "dissolve_degenerate", toggle=True)
+                    layout.prop(self, "remove_doubles", toggle=True)
+                    layout.prop(self, "face_split_by_edges", toggle=True)
+                    layout.prop(self, "beautify_fill", toggle=True)
+                with layout.column(True):
+                    with layout.row()(alignment='LEFT'):
+                        layout.prop(self, "dissolve_degenerate_threshold")
+                    with layout.row()(alignment='LEFT'):
+                        layout.prop(self, "remove_doubles_threshold")
+                        layout.prop(self, "remove_doubles_use_unselected")
+                    with layout.row()(alignment='LEFT'):
+                        layout.label("") # face_split_by_edges has no parameters
+                    with layout.row()(alignment='LEFT'):
+                        layout.prop(self, "beautify_fill_angle_limit")
+            
+            layout.label("Topology")
+            with layout.split(0.25):
+                with layout.column(True):
+                    layout.prop(self, "fill_holes", toggle=True)
+                    layout.prop(self, "intersect", toggle=True)
+                    layout.prop(self, "normals", toggle=True)
+                    layout.prop(self, "delete_loose", toggle=True)
+                with layout.column(True):
+                    with layout.row()(alignment='LEFT'):
+                        layout.prop(self, "fill_holes_sides")
+                    with layout.row()(alignment='LEFT'):
+                        layout.prop(self, "intersect_mode", text="")
+                        layout.prop(self, "intersect_threshold")
+                        layout.prop(self, "intersect_use_separate")
+                    with layout.row()(alignment='LEFT'):
+                        layout.prop_enum(self, "normals_type", 'OUTSIDE')
+                        layout.prop_enum(self, "normals_type", 'INSIDE')
+                        layout.prop_enum(self, "normals_type", 'FLIP')
+                    with layout.row()(alignment='LEFT'):
+                        layout.prop(self, "delete_loose_use_verts")
+                        layout.prop(self, "delete_loose_use_edges")
+                        layout.prop(self, "delete_loose_use_faces")
+            
+            layout.label("Curvature")
+            with layout.split(0.25):
+                with layout.column(True):
+                    layout.prop(self, "dissolve_limited", toggle=True)
+                    layout.prop(self, "vert_connect_nonplanar", toggle=True)
+                    layout.prop(self, "shade", toggle=True)
+                with layout.column(True):
+                    with layout.row()(alignment='LEFT'):
+                        layout.prop(self, "dissolve_limited_angle_limit")
+                        layout.prop_menu_enum(self, "dissolve_limited_delimit")
+                        layout.prop(self, "dissolve_limited_use_dissolve_boundaries")
+                    with layout.row()(alignment='LEFT'):
+                        layout.prop(self, "vert_connect_nonplanar_angle_limit")
+                    with layout.row()(alignment='LEFT'):
+                        layout.prop_enum(self, "shade_type", 'SMOOTH')
+                        layout.prop_enum(self, "shade_type", 'FLAT')
+            
+            layout.label("Tris, Quads")
+            with layout.split(0.25):
+                with layout.column(True):
+                    layout.prop(self, "quads_convert_to_tris", toggle=True)
+                    layout.prop(self, "tris_convert_to_quads", toggle=True)
+                    layout.prop(self, "poke", toggle=True)
+                with layout.column(True):
+                    with layout.row()(alignment='EXPAND'):
+                        layout.prop(self, "quads_convert_to_tris_quad_method", text="Quad")
+                        layout.prop(self, "quads_convert_to_tris_ngon_method", text="Ngon")
+                    with layout.row()(alignment='LEFT'):
+                        layout.prop(self, "tris_convert_to_quads_limit")
+                        layout.prop(self, "tris_convert_to_quads_uvs", text="UVs")
+                        layout.prop(self, "tris_convert_to_quads_vcols", text="VCols")
+                        layout.prop(self, "tris_convert_to_quads_sharp", text="Sharp")
+                        layout.prop(self, "tris_convert_to_quads_materials", text="Materials")
+                    with layout.row()(alignment='EXPAND'):
+                        with layout.row()(scale_x=1.1):
+                            layout.prop(self, "poke_center_mode", text="Center")
+                        layout.prop(self, "poke_offset")
+                        layout.prop(self, "poke_use_relative_offset")
+            
+            layout.label("Sorting")
+            with layout.split(0.25):
+                with layout.column(True):
+                    layout.prop(self, "sort", toggle=True)
+                with layout.column(True):
+                    with layout.row()(alignment='LEFT'):
+                        layout.prop(self, "sort_type", text="")
+                        layout.prop(self, "sort_reverse")
+                        layout.prop(self, "sort_verts")
+                        layout.prop(self, "sort_edges")
+                        layout.prop(self, "sort_faces")
+    
+    def apply(self, context, select_all=True):
+        #if select_all: bpy.ops.mesh.select_all(action='SELECT') # after each operation
+        
+        # Symmetry
+        if self.symmetrize:
+            bpy.ops.mesh.symmetrize(
+                direction=self.symmetrize_direction,
+                threshold=self.symmetrize_threshold,
+            )
+            if select_all: bpy.ops.mesh.select_all(action='SELECT')
+        elif self.symmetry_snap:
+            bpy.ops.mesh.symmetry_snap(
+                direction=self.symmetry_snap_direction,
+                threshold=self.symmetry_snap_threshold,
+                factor=self.symmetry_snap_factor,
+                use_center=self.symmetry_snap_use_center,
+            )
+            if select_all: bpy.ops.mesh.select_all(action='SELECT')
+        
+        # Degenerate
+        if self.dissolve_degenerate:
+            bpy.ops.mesh.dissolve_degenerate(
+                threshold=self.dissolve_degenerate_threshold,
+            )
+            if select_all: bpy.ops.mesh.select_all(action='SELECT')
+        
+        if self.remove_doubles:
+            bpy.ops.mesh.remove_doubles(
+                threshold=self.remove_doubles_threshold,
+                use_unselected=self.remove_doubles_use_unselected,
+            )
+            if select_all: bpy.ops.mesh.select_all(action='SELECT')
+        
+        if self.face_split_by_edges:
+            bpy.ops.mesh.face_split_by_edges()
+            if select_all: bpy.ops.mesh.select_all(action='SELECT')
+        
+        if self.beautify_fill:
+            bpy.ops.mesh.beautify_fill(
+                angle_limit=self.beautify_fill_angle_limit,
+            )
+            if select_all: bpy.ops.mesh.select_all(action='SELECT')
+        
+        # Topology
+        if self.fill_holes:
+            bpy.ops.mesh.fill_holes(
+                sides=self.fill_holes_sides,
+            )
+            if select_all: bpy.ops.mesh.select_all(action='SELECT')
+        
+        if self.intersect and BpyOp("mesh.intersect"):
+            bpy.ops.mesh.intersect(
+                mode=self.intersect_mode,
+                threshold=self.intersect_threshold,
+                use_separate=self.intersect_use_separate,
+            )
+            if select_all: bpy.ops.mesh.select_all(action='SELECT')
+        
+        if self.normals:
+            if self.normals_type == 'OUTSIDE':
+                bpy.ops.mesh.normals_make_consistent(inside=False)
+            elif self.normals_type == 'INSIDE':
+                bpy.ops.mesh.normals_make_consistent(inside=True)
+            elif self.normals_type == 'FLIP':
+                bpy.ops.mesh.flip_normals()
+            if select_all: bpy.ops.mesh.select_all(action='SELECT')
+        
+        if self.delete_loose:
+            bpy.ops.mesh.delete_loose(
+                use_verts=self.delete_loose_use_verts,
+                use_edges=self.delete_loose_use_edges,
+                use_faces=self.delete_loose_use_faces,
+            )
+            if select_all: bpy.ops.mesh.select_all(action='SELECT')
+        
+        # Curvature
+        if self.dissolve_limited:
+            bpy.ops.mesh.dissolve_limited(
+                angle_limit=self.dissolve_limited_angle_limit,
+                delimit=self.dissolve_limited_delimit,
+                use_dissolve_boundaries=self.dissolve_limited_use_dissolve_boundaries,
+            )
+            if select_all: bpy.ops.mesh.select_all(action='SELECT')
+        
+        if self.vert_connect_nonplanar:
+            bpy.ops.mesh.vert_connect_nonplanar(
+                angle_limit=self.vert_connect_nonplanar_angle_limit,
+            )
+            if select_all: bpy.ops.mesh.select_all(action='SELECT')
+        
+        if self.shade:
+            if self.shade_type == 'SMOOTH':
+                bpy.ops.mesh.faces_shade_smooth()
+            elif self.shade_type == 'FLAT':
+                bpy.ops.mesh.faces_shade_flat()
+            if select_all: bpy.ops.mesh.select_all(action='SELECT')
+        
+        # Tris, Quads
+        if self.quads_convert_to_tris:
+            bpy.ops.mesh.quads_convert_to_tris(
+                quad_method=self.quads_convert_to_tris_quad_method,
+                ngon_method=self.quads_convert_to_tris_ngon_method,
+            )
+            if select_all: bpy.ops.mesh.select_all(action='SELECT')
+        
+        if self.tris_convert_to_quads:
+            bpy.ops.mesh.tris_convert_to_quads(
+                limit=self.tris_convert_to_quads_limit,
+                uvs=self.tris_convert_to_quads_uvs,
+                vcols=self.tris_convert_to_quads_vcols,
+                sharp=self.tris_convert_to_quads_sharp,
+                materials=self.tris_convert_to_quads_materials,
+            )
+            if select_all: bpy.ops.mesh.select_all(action='SELECT')
+        
+        if self.poke:
+            bpy.ops.mesh.poke(
+                center_mode=self.poke_center_mode,
+                offset=self.poke_offset,
+                use_relative_offset=self.poke_use_relative_offset,
+            )
+            if select_all: bpy.ops.mesh.select_all(action='SELECT')
+        
+        # Sorting
+        if self.sort:
+            sort_elements = set()
+            if self.sort_verts: sort_elements.add('VERT')
+            if self.sort_edges: sort_elements.add('EDGE')
+            if self.sort_faces: sort_elements.add('FACE')
+            bpy.ops.mesh.sort_elements(
+                type=self.sort_type,
+                reverse=self.sort_reverse,
+                elements=sort_elements,
+            )
+            #if select_all: bpy.ops.mesh.select_all(action='SELECT') # no need
+    
+    @classmethod
+    def poll(cls, context):
+        return (context.mode == 'OBJECT') or (context.mode == 'EDIT_MESH')
+    
+    def invoke(self, context, event):
+        # Note: changing operator parameters here will have no effect on the popup
+        wm = context.window_manager
+        return wm.invoke_props_dialog(self, width=600)
+    
+    def execute(self, context):
+        bpy.ops.ed.undo_push(message="Batch streamline meshes")
+        
+        active_obj = context.active_object
+        
+        if active_obj and (active_obj.type == 'MESH') and (active_obj.mode == 'EDIT'):
+            mesh = active_obj.data
+            total_sel = (mesh.total_vert_sel + mesh.total_edge_sel + mesh.total_face_sel)
+            if total_sel == 0: bpy.ops.mesh.select_all(action='SELECT')
+            
+            self.apply(context, (total_sel == 0))
+            
+            if total_sel == 0: bpy.ops.mesh.select_all(action='DESELECT')
+        elif active_obj and (active_obj.mode != 'OBJECT'):
+            return {'CANCELLED'}
+        else:
+            scene = context.scene
+            objects = (bpy.data.objects if self.globally else context.selected_objects)
+            
+            for obj in IndividuallyActiveSelected(objects):
+                if obj.type not in BlEnums.object_types_geometry: continue
+                
+                if obj.type != 'MESH':
+                    if not self.convert_to_mesh: continue
+                    bpy.ops.object.convert(target='MESH')
+                
+                bpy.ops.object.mode_set(mode='EDIT')
+                bpy.ops.mesh.select_all(action='SELECT')
+                
+                self.apply(context)
+                
+                bpy.ops.object.mode_set(mode='OBJECT')
+        
+        return {'FINISHED'}
+
+@LeftRightPanel(idname="VIEW3D_PT_batch_operations", space_type='VIEW_3D', category="Batch", label="Batch Operations")
 def Panel_Batch_Operations(self, context):
     layout = NestedLayout(self.layout)
     layout.operator("object.batch_repeat_actions")
     layout.operator("object.batch_clear_slots_and_layers")
+    layout.operator("object.batch_streamline_meshes")
 
 #============================================================================#
 
@@ -967,13 +1369,8 @@ def make_category(globalvars, idname_attr="name", **kwargs):
         setattr(CategoryItemPG, name, None | prop(**prop_kwargs))
         
         aggr = params.get("aggr")
-        if from_obj:
-            # The user is probably more interested in "is there something visible at all?"
-            if aggr is None: aggr = dict(init=('BOOL', {"same", "min", "max", "mean"}), convert=round_to_bool, invert=invert)
-            AggregateInfo.aggr_infos_objs[name] = aggr
-        else:
-            if aggr is None: aggr = dict(init=('BOOL', {"same", "min", "max", "mean"}), convert=round_to_bool, invert=invert)
-            AggregateInfo.aggr_infos[name] = aggr
+        if aggr is None: aggr = dict(init=('BOOL', {"same", "min", "max", "mean"}), convert=round_to_bool, invert=invert)
+        (AggregateInfo.aggr_infos_objs if from_obj else AggregateInfo.aggr_infos)[name] = aggr
     
     CategoryOptionsPG.quick_access = quick_access_default | prop("Quick access", "Quick access", items=quick_access_items)
     
@@ -1165,7 +1562,6 @@ def make_category(globalvars, idname_attr="name", **kwargs):
                         icon_kw = BatchOperations.icon_kwargs(item.idname)
                         icon_novalue = BatchOperations.icon_kwargs(item.idname, False)["icon"]
                         
-                        #layout.menu("VIEW3D_MT_batch_{}_extras".format(category_name_plural), text="", icon='DOTSDOWN', emboss=emboss)
                         op = layout.operator("object.batch_{}_extras".format(category_name), text="", icon='DOTSDOWN', emboss=emboss)
                         op.idnames = item.idname or all_idnames
                         op.index = item.sort_id
@@ -1191,13 +1587,6 @@ def make_category(globalvars, idname_attr="name", **kwargs):
                             if action_idname not in options.quick_access: continue
                             with layout.row(True)(alert=use_affect and (not can_affect)):
                                 draw_toggle_or_action(layout, item, (item.idname or all_idnames), title, icon_novalue, cmd, cmd_kwargs, from_obj, emboss)
-                        
-                        """
-                        with layout.row(True)(alert=not can_affect):
-                            op = layout.operator("object.batch_{}_remove".format(category_name), text="", icon='X', emboss=emboss)
-                            op.idnames = item.idname or all_idnames
-                            op.index = item.sort_id
-                        """
     
     CategoryPG.Category_Name = Category_Name
     CategoryPG.CATEGORY_NAME = CATEGORY_NAME
@@ -1218,64 +1607,10 @@ def make_category(globalvars, idname_attr="name", **kwargs):
         item = category.items[index]
         icon_novalue = BatchOperations.icon_kwargs(item.idname, False)["icon"]
         
-        """
-        search_in = options.search_in
-        if search_in == 'FILE': search_in = 'SCENE' # shouldn't affect other scenes here
-        
-        #related_objs_scene = tuple(BatchOperations.find_objects(idnames, 'SCENE'))
-        #related_objs_idnames_scene = idnames_separator.join(obj.name for obj in related_objs_scene)
-        
-        related_objs = tuple(BatchOperations.find_objects(idnames, search_in))
-        related_objs_idnames = idnames_separator.join(obj.name for obj in related_objs)
-        
-        aggr_hide = Aggregator('BOOL', {"min", "max"})
-        aggr_hide_select = Aggregator('BOOL', {"min", "max"})
-        aggr_hide_render = Aggregator('BOOL', {"min", "max"})
-        for obj in related_objs:
-            aggr_hide.add(obj.hide)
-            aggr_hide_select.add(obj.hide_select)
-            aggr_hide_render.add(obj.hide_render)
-        
-        # The user is probably more interested in "is there something visible at all?"
-        is_hide = bool(aggr_hide.min)
-        is_hide_select = bool(aggr_hide_select.min)
-        is_hide_render = bool(aggr_hide_render.min)
-        """
-        
         def draw_popup_menu(self, context):
             layout = NestedLayout(self.layout)
-            
-            """
-            #icon = ('RESTRICT_VIEW_ON' if is_hide else 'RESTRICT_VIEW_OFF')
-            icon = ('CHECKBOX_DEHLT' if is_hide else 'CHECKBOX_HLT')
-            op = layout.operator("object.batch_hide", icon=icon)
-            op.idnames = related_objs_idnames
-            op.state = not is_hide
-            
-            #icon = ('RESTRICT_SELECT_ON' if is_hide_select else 'RESTRICT_SELECT_OFF')
-            icon = ('CHECKBOX_DEHLT' if is_hide_select else 'CHECKBOX_HLT')
-            op = layout.operator("object.batch_hide_select", icon=icon)
-            op.idnames = related_objs_idnames
-            op.state = not is_hide_select
-            
-            #icon = ('RESTRICT_RENDER_ON' if is_hide_render else 'RESTRICT_RENDER_OFF')
-            icon = ('CHECKBOX_DEHLT' if is_hide_render else 'CHECKBOX_HLT')
-            op = layout.operator("object.batch_hide_render", icon=icon)
-            op.idnames = related_objs_idnames
-            op.state = not is_hide_render
-            """
-            
             for cmd, cmd_kwargs, action_idname, from_obj, use_affect, after_name in nongeneric_actions:
                 draw_toggle_or_action(layout, item, idnames, title, icon_novalue, cmd, cmd_kwargs, from_obj)
-            
-            """
-            op = layout.operator("object.batch_set_layers", icon='RENDERLAYERS')
-            op.idnames = related_objs_idnames
-            
-            op = layout.operator("object.batch_parent_to_empty", icon='OUTLINER_OB_EMPTY') # or 'OOPS' ?
-            op.idnames = related_objs_idnames
-            op.category_idnames = idnames
-            """
         
         context.window_manager.popup_menu(draw_popup_menu, title="{} extras".format(title), icon='DOTSDOWN')
     

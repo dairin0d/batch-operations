@@ -249,7 +249,8 @@ class NestedLayout:
         containers, supply panel's bl_idname as the idname.
         """
         if isinstance(layout, cls):
-            return layout
+            if layout._idname == idname:
+                return layout
         
         self = object.__new__(cls)
         self._idname = idname
@@ -323,7 +324,7 @@ class NestedLayout:
     bpy.utils.register_class(FoldPG) # REGISTER
     
     # make up some name that's unlikely to be used by normal addons
-    folds_keyname = "bpy_extras_ui_utils_NestedLayout_ui_folds"
+    folds_keyname = "dairin0d_ui_utils_NestedLayout_ui_folds"
     setattr(bpy.types.Screen, folds_keyname, bpy.props.CollectionProperty(type=FoldPG)) # REGISTER
     
     folded = False # stores folded status from the latest fold() call
@@ -370,8 +371,7 @@ class NestedLayout:
         
         with res.row(True)(alignment='LEFT'):
             if not this_fold.changed:
-                res.prop(this_fold, "value", text=text, icon=icon,
-                    emboss=False, toggle=True)
+                res.prop(this_fold, "value", text=text, icon=icon, emboss=False, toggle=True)
             else:
                 # Blender won't redraw active UI element
                 # until user moves mouse out of its bounding box.
