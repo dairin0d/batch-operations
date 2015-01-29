@@ -108,64 +108,65 @@ def wrap_text(text, width, fontid=0, indent=0):
 # since Blender only shows the report from the currently executing operator.
 
 # ===== MESSAGEBOX ===== #
-class INFO_OT_messagebox(bpy.types.Operator):
-    bl_idname = "info.messagebox"
+if not hasattr(bpy.types, "INFO_OT_messagebox"):
+    class INFO_OT_messagebox(bpy.types.Operator):
+        bl_idname = "info.messagebox"
+        
+        # "Attention!" is quite generic caption that suits
+        # most of the situations when "OK" button is desirable.
+        # bl_label isn't really changeable at runtime
+        # (changing it causes some memory errors)
+        bl_label = "Attention!"
+        
+        # We can't pass arguments through normal means,
+        # since in this case a "Reset" button would appear
+        args = {}
+        
+        # If we don't define execute(), there would be
+        # an additional label "*Redo unsupported*"
+        def execute(self, context):
+            return {'FINISHED'}
+        
+        def invoke(self, context, event):
+            text = self.args.get("text", "")
+            self.icon = self.args.get("icon", 'NONE')
+            if (not text) and (self.icon == 'NONE'):
+                return {'CANCELLED'}
+            
+            border_w = 8*2
+            icon_w = (0 if (self.icon == 'NONE') else 16)
+            w_incr = border_w + icon_w
+            
+            width = self.args.get("width", 300) - border_w
+            
+            self.lines = []
+            max_x = split_text(width, icon_w, 0, text, self.lines)
+            width = max_x + border_w
+            
+            self.spacing = self.args.get("spacing", 0.5)
+            self.spacing = max(self.spacing, 0.0)
+            
+            wm = context.window_manager
+            
+            confirm = self.args.get("confirm", False)
+            
+            if confirm:
+                return wm.invoke_props_dialog(self, width)
+            else:
+                return wm.invoke_popup(self, width)
+        
+        def draw(self, context):
+            layout = self.layout
+            
+            col = layout.column()
+            col.scale_y = 0.5 * (1.0 + self.spacing * 0.5)
+            
+            icon = self.icon
+            for line in self.lines:
+                col.label(text=line, icon=icon)
+                icon = 'NONE'
     
-    # "Attention!" is quite generic caption that suits
-    # most of the situations when "OK" button is desirable.
-    # bl_label isn't really changeable at runtime
-    # (changing it causes some memory errors)
-    bl_label = "Attention!"
-    
-    # We can't pass arguments through normal means,
-    # since in this case a "Reset" button would appear
-    args = {}
-    
-    # If we don't define execute(), there would be
-    # an additional label "*Redo unsupported*"
-    def execute(self, context):
-        return {'FINISHED'}
-    
-    def invoke(self, context, event):
-        text = self.args.get("text", "")
-        self.icon = self.args.get("icon", 'NONE')
-        if (not text) and (self.icon == 'NONE'):
-            return {'CANCELLED'}
-        
-        border_w = 8*2
-        icon_w = (0 if (self.icon == 'NONE') else 16)
-        w_incr = border_w + icon_w
-        
-        width = self.args.get("width", 300) - border_w
-        
-        self.lines = []
-        max_x = split_text(width, icon_w, 0, text, self.lines)
-        width = max_x + border_w
-        
-        self.spacing = self.args.get("spacing", 0.5)
-        self.spacing = max(self.spacing, 0.0)
-        
-        wm = context.window_manager
-        
-        confirm = self.args.get("confirm", False)
-        
-        if confirm:
-            return wm.invoke_props_dialog(self, width)
-        else:
-            return wm.invoke_popup(self, width)
-    
-    def draw(self, context):
-        layout = self.layout
-        
-        col = layout.column()
-        col.scale_y = 0.5 * (1.0 + self.spacing * 0.5)
-        
-        icon = self.icon
-        for line in self.lines:
-            col.label(text=line, icon=icon)
-            icon = 'NONE'
-
-bpy.utils.register_class(INFO_OT_messagebox) # REGISTER
+    bpy.utils.register_class(INFO_OT_messagebox) # REGISTER
 
 def messagebox(text, icon='NONE', width=300, confirm=False, spacing=0.5):
     """
@@ -181,6 +182,7 @@ def messagebox(text, icon='NONE', width=300, confirm=False, spacing=0.5):
     spacing -- relative distance between the lines
         Defaults to 0.5.
     """
+    INFO_OT_messagebox = bpy.types.INFO_OT_messagebox
     INFO_OT_messagebox.args["text"] = text
     INFO_OT_messagebox.args["icon"] = icon
     INFO_OT_messagebox.args["width"] = width

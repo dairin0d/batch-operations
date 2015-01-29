@@ -23,7 +23,7 @@ import math
 import time
 import json
 
-from mathutils import Vector
+from mathutils import Color, Vector, Euler, Quaternion, Matrix
 
 try:
     import dairin0d
@@ -32,12 +32,13 @@ except ImportError:
     dairin0d_location = "."
 
 exec("""
+from {0}dairin0d.utils_math import matrix_compose, matrix_decompose
 from {0}dairin0d.utils_view3d import SmartView3D
 from {0}dairin0d.utils_blender import Selection
 from {0}dairin0d.utils_userinput import KeyMapUtils
 from {0}dairin0d.utils_ui import NestedLayout, tag_redraw
 from {0}dairin0d.bpy_inspect import prop, BlRna, BlEnums, bpy_struct
-from {0}dairin0d.utils_accumulation import Aggregator, aggregated
+from {0}dairin0d.utils_accumulation import Aggregator, VectorAggregator
 from {0}dairin0d.utils_addon import AddonManager
 """.format(dairin0d_location))
 
@@ -52,21 +53,6 @@ addon = AddonManager()
 
 """
 Batch Transform:
-* orientations / coordinate systems (is it possible to make them independent for each View3D?)
-** base (shown by Blender by default)
-** global
-** local / parent
-** object / self ? (useful for transformations relative to current matrix)
-** active
-** individual (same as object/self coordinate system?)
-** gimbal?
-** surface?
-** normal?
-** view
-** custom
-* actually, users might want to choose orientation, scale and origin independently
-** in addition to options listed for coordinate systems, origins may include cursor, bookmark and some aggregate value of selection's positions
-* coordinate systems are combinations of origin, orientation and scale. Make it possible to make custom combinations for quick access?
 * (batch) "geometry" property for all modes that can have selected elements
 * (batch) apply rotation/scale/etc.
 * (batch) change origin of geometry
@@ -122,20 +108,6 @@ fusion 360 has a lot of cool features (moth3r says it's the most user-friendly C
   of aggregators and update them simultaneously.
 
 
-Queries/statistics (within a single coord system):
-* Object/element level
-** count, same (on general level)
-** value of active object/element
-** min, max
-** range, center
-** mean, stddev
-** median, mode (BUT: these consume space)
-* Sub-element level
-** min, max
-** range, center
-** mean, stddev
-** median, mode (BUT: these consume space)
-
 * Option to treat isolated islands as separate objects?
 
 moth3r suggests making it an option for where to "store" the coordinates system
@@ -149,32 +121,12 @@ In general, for each parameter, the user might want to see several aggregate cha
 Use table: each row is a separate attribute, and each column is a certain characteristic
 
 
-
 [global options] Coord System panel:
 
 // global options:
 // * sync coordsystems between 3D views
 
-** [LRS] base (shown by Blender by default)
-** [LRS] global / world
-** [LRS] parent (coincides with global if there is no parent)
-** [LRS] local / self / individual (useful for transformations relative to current matrix)
-** [LRS] active object/bone
-** [LRS] custom (user-specified object/bone)
-** [LRS] view
-** [ R ] gimbal (euler rotation axes)
-** [ R ] normal (average of elements' normals or bones' Y-axes)
-** [LR ] surface (last picked value)
-** [L  ] cursor
-** [L  ] bookmark (?)
-** [L  ] average (?)
-** [L  ] center (?)
-** [L  ] min (?)
-** [L  ] max (?)
-** [  S] range / bounding box (?)
-** [  S] stddev (?)
-
-// built-in coordinate systems should be not editable
+// TODO: built-in coordinate systems should be not editable ?
 
 ["select coordsys" dropdown][add][remove]
 ["rename" text field]["display local grid" toggle]
@@ -244,8 +196,6 @@ Batch Transform panel (an example):
 
 
 
-TODO:
-* add coordsys selection dropdown to Batch Transforms (in particular, because moth3r likes to have Coordsys Panel on the bottom)
 
 
 
@@ -288,76 +238,73 @@ category_icon = 'MANIPUL'
 
 #============================================================================#
 
+class CoordSystemMatrix:
+    def __init__(self, coordsys=None):
+        self.update(coordsys)
+    
+    def update(self, coordsys):
+        if coordsys:
+            aspect = coordsys.aspect_L
+            self.L = (aspect.mode, aspect.obj_name, aspect.bone_name)
+            aspect = coordsys.aspect_R
+            self.R = (aspect.mode, aspect.obj_name, aspect.bone_name)
+            aspect = coordsys.aspect_S
+            self.S = (aspect.mode, aspect.obj_name, aspect.bone_name)
+            self.extra_matrix = coordsys.extra_matrix
+        else:
+            self.L = ('GLOBAL', "", "")
+            self.R = ('GLOBAL', "", "")
+            self.S = ('GLOBAL', "", "")
+            self.extra_matrix = Matrix()
+    
+    def transform(self, context, obj):
+        # For now -- just basis
+        
+        L = obj.location.copy()
+        
+        if obj.rotation_mode == 'QUATERNION':
+            R = obj.rotation_quaternion.copy()
+        elif obj.rotation_mode == 'AXIS_ANGLE':
+            R = tuple(obj.rotation_axis_angle)
+            R = Quaternion(R[:3], R[3])
+        else:
+            R = obj.rotation_euler.to_quaternion()
+        
+        S = obj.scale.copy()
+        
+        return (L, R, S)
+
 #@addon.PropertyGroup
 @addon.IDBlock(name="Coordsys", icon='MANIPUL', show_empty=False)
 class CoordSystemPG:
-    """
-    [LRS] base / basis (shown by Blender by default)
-    [LRS] global / world
-    [LRS] parent (coincides with global if there is no parent)
-    [LRS] local / self / individual (useful for transformations relative to current matrix)
-    [LRS] active object/bone
-    [LRS] custom (user-specified object/bone)
-    [LRS] view
-    [ R ] gimbal (euler rotation axes)
-    [ R ] normal (average of elements' normals or bones' Y-axes)
-    [LR ] surface (last picked value)
-    [L  ] cursor
-    [L  ] bookmark (?)
-    [L  ] average (?)
-    [L  ] center (?)
-    [L  ] min (?)
-    [L  ] max (?)
-    [  S] range / bounding box (?)
-    [  S] stddev (?)
-    [L  ] pivot (current pivot)
-    [ R ] orientation (current orientation)
-
-Surface EDIT SNAP_NORMAL SNAP_SURFACE
-
-Gimbal NDOF_DOM NDOF_TURN AXIS_SIDE MAN_ROT
-Normal PHYSICS SNAP_NORMAL
-Orientation NDOF_DOM AXIS_SIDE AXIS_FRONT AXIS_TOP MANIPUL
-
-Cursor CURSOR
-Bookmark BOOKMARKS
-Average ROTATECENTER
-Center ROTATE
-Min STICKY_UVS_VERT TRIA_DOWN TRIA_LEFT DISCLOSURE_TRI_DOWN TRIA_DOWN_BAR TRIA_LEFT_BAR PREV_KEYFRAME PLAY_REVERSE FRAME_PREV
-Max STICKY_UVS_VERT TRIA_UP TRIA_RIGHT DISCLOSURE_TRI_RIGHT TRIA_UP_BAR TRIA_RIGHT_BAR NEXT_KEYFRAME PLAY FRAME_NEXT
-Pivot DOT RADIOBUT_ON LINK LAYER_USED LAYER_ACTIVE MANIPUL
-
-Range ARROW_LEFTRIGHT CHECKBOX_DEHLT MENU_PANEL FULLSCREEN FULLSCREEN_ENTER ALIGN CLIPUV_DEHLT SNAP_PEEL_OBJECT BBOX MATPLANE
-Stddev INLINK FREEZE PARTICLES GROUP_VERTEX STICKY_UVS_DISABLE
-    """
     items_LRS = [
-        ('BASIS', "Basis", "", 'BLENDER'),
-        ('GLOBAL', "Global", "", 'WORLD'),
-        ('PARENT', "Parent", "", 'GROUP_BONE'),
-        ('LOCAL', "Local", "", 'ROTATECOLLECTION'),
-        ('ACTIVE', "Active", "", 'ROTACTIVE'),
-        ('OBJECT', "Object/bone", "", 'OBJECT_DATA'),
-        ('VIEW', "View", "", 'CAMERA_DATA'),
+        ('BASIS', "Basis", "Raw position/rotation/scale", 'BLENDER'),
+        ('GLOBAL', "Global", "Global (world) coordinate system", 'WORLD'),
+        ('PARENT', "Parent", "Parent's coordinate system (coincides with Global if there is no parent)", 'GROUP_BONE'),
+        ('LOCAL', "Local", "Local (individual) coordinate system", 'ROTATECOLLECTION'),
+        ('ACTIVE', "Active", "Coordinate system of active object (coincides with Global if there is no active object)", 'ROTACTIVE'),
+        ('OBJECT', "Object/bone", "Coordinate system of the specified object/bone", 'OBJECT_DATA'),
+        ('VIEW', "View", "Viewport coordinate system", 'CAMERA_DATA'),
     ]
     items_L = items_LRS + [
-        ('SURFACE', "Surface", "", 'EDIT'),
-        ('CURSOR', "Cursor", "", 'CURSOR'),
-        ('BOOKMARK', "Bookmark", "", 'BOOKMARKS'),
-        ('AVERAGE', "Average", "", 'ROTATECENTER'),
-        ('CENTER', "Center", "", 'ROTATE'),
-        ('MIN', "Min", "", 'FRAME_PREV'),
-        ('MAX', "Max", "", 'FRAME_NEXT'),
-        ('PIVOT', "Pivot", "", 'MANIPUL'),
+        ('SURFACE', "Surface", "Raycasted position", 'EDIT'),
+        ('CURSOR', "Cursor", "3D cursor position", 'CURSOR'),
+        ('BOOKMARK', "Bookmark", "Bookmark position", 'BOOKMARKS'),
+        ('AVERAGE', "Average", "Average of selected items' positions", 'ROTATECENTER'),
+        ('CENTER', "Center", "Center of selected items' positions", 'ROTATE'),
+        ('MIN', "Min", "Minimum of selected items' positions", 'FRAME_PREV'),
+        ('MAX', "Max", "Maximum of selected items' positions", 'FRAME_NEXT'),
+        ('PIVOT', "Pivot", "Position of the transform manipulator", 'MANIPUL'),
     ]
     items_R = items_LRS + [
-        ('SURFACE', "Surface", "", 'EDIT'),
-        ('NORMAL', "Normal", "", 'SNAP_NORMAL'),
-        ('GIMBAL', "Gimbal", "", 'NDOF_DOM'),
-        ('ORIENTATION', "Orientation", "", 'MANIPUL'),
+        ('SURFACE', "Surface", "Orientation aligned to the raycasted normal/tangents", 'EDIT'),
+        ('NORMAL', "Normal", "Orientation aligned to the average of elements' normals or bones' Y-axes", 'SNAP_NORMAL'),
+        ('GIMBAL', "Gimbal", "Orientation aligned to the Euler rotation axes", 'NDOF_DOM'),
+        ('ORIENTATION', "Orientation", "Specified orientation", 'MANIPUL'),
     ]
     items_S = items_LRS + [
-        ('RANGE', "Range", "", 'BBOX'),
-        ('STDDEV', "Deviation", "", 'STICKY_UVS_DISABLE'),
+        ('RANGE', "Range", "Use bounding box dimensions as the scale of each axis", 'BBOX'),
+        ('STDDEV', "Deviation", "Use standard deviation as the scale of the system", 'STICKY_UVS_DISABLE'),
     ]
     
     icons_L = {item[0]:item[3] for item in items_L}
@@ -397,6 +344,10 @@ Stddev INLINK FREEZE PARTICLES GROUP_VERTEX STICKY_UVS_DISABLE
     extra_Y = Vector((0, 1, 0)) | prop("Y axis", "Y axis")
     extra_Z = Vector((0, 0, 1)) | prop("Z axis", "Z axis")
     extra_T = Vector((0, 0, 0)) | prop("Translation", "Translation")
+    
+    @property
+    def extra_matrix(self):
+        return matrix_compose(self.extra_X, self.extra_Y, self.extra_Z, self.extra_T)
     
     def make_get_reset(axis_id):
         def get_reset(self):
@@ -532,7 +483,7 @@ class CoordSystemManagerPG:
         coordsys.aspect_R.mode = 'NORMAL'
         coordsys.aspect_S.mode = 'GLOBAL'
         
-        self.coordsystem.selector = "Parent"
+        self.coordsystem.selector = "Global"
         
         self.defaults_initialized = True
     
@@ -550,21 +501,8 @@ after_register_callbacks.append(CoordSystemManagerPG.after_register)
 
 @LeftRightPanel(idname="VIEW3D_PT_coordsystem", space_type='VIEW_3D', category="Batch", label="Coordinate System")
 class Panel_Coordsystem:
-    def draw_header(self, context):
-        layout = NestedLayout(self.layout)
-        category = get_category()
-        options = get_options()
-        #with layout.row(True)(scale_x=0.9):
-        #    icon = CategoryOptionsPG.search_in_icons[options.search_in]
-        #    layout.prop_menu_enum(options, "search_in", text="", icon=icon)
-        #    icon = CategoryOptionsPG.paste_mode_icons[options.paste_mode]
-        #    layout.prop_menu_enum(options, "paste_mode", text="", icon=icon)
-    
     def draw(self, context):
         layout = NestedLayout(self.layout)
-        category = get_category()
-        options = get_options()
-        
         context.screen.coordsystem_manager.draw(layout)
 
 def make_vector_base():
@@ -602,6 +540,20 @@ class LocationPG(make_vector_base()):
     z = [FloatPG5] | prop()
     z_lock = False | prop()
     
+    def safe_vector(self, vc):
+        return (0.0 if vc is None else vc)
+    def set_vector(self, i, v):
+        self.x[i].value = self.safe_vector(v[0])
+        self.y[i].value = self.safe_vector(v[1])
+        self.z[i].value = self.safe_vector(v[2])
+    
+    def safe_lock(self, vc):
+        return (True if vc is None else vc)
+    def set_lock(self, v):
+        self.x_lock = self.safe_lock(v[0])
+        self.y_lock = self.safe_lock(v[1])
+        self.z_lock = self.safe_lock(v[2])
+    
     def draw(self, layout, summaries, text, folded=False):
         with layout.row():
             with layout.fold(text, "row"):
@@ -612,29 +564,37 @@ class LocationPG(make_vector_base()):
         
         if (not is_folded) and summaries:
             with layout.column(True):
-                self.draw_axis(layout, summaries, "x", "x")
-                self.draw_axis(layout, summaries, "y", "y")
-                self.draw_axis(layout, summaries, "z", "z")
+                self.draw_axis(layout, summaries, 0, "x", "x")
+                self.draw_axis(layout, summaries, 1, "y", "y")
+                self.draw_axis(layout, summaries, 2, "z", "z")
     
     def match_summaries(self, summaries, axis=None):
         if axis is None:
             self.match_summaries(summaries, self.x)
             self.match_summaries(summaries, self.y)
             self.match_summaries(summaries, self.z)
-        elif len(axis) != summaries:
+        elif len(axis) != len(summaries):
             axis.clear()
             for i in range(len(summaries)):
                 axis.add()
     
-    def draw_axis(self, layout, summaries, axis_id, axis_name):
+    def draw_axis(self, layout, summaries, axis_i, axis_id, axis_name):
         axis = getattr(self, axis_id)
         axis_lock = getattr(self, axis_id+"_lock")
+        
         self.match_summaries(summaries, axis)
+        
+        vector_same = self.get("vector:same", True)
+        lock_same = self.get("lock:same", True)
+        
         with layout.row(True):
-            for axis_item in axis:
-                layout.prop(axis_item, "value", text=axis_name)
-            icon = ('LOCKED' if axis_lock else 'UNLOCKED')
-            layout.prop(self, axis_id+"_lock", text="", icon=icon, toggle=True)
+            with layout.row(True)(alert=not vector_same[axis_i]):
+                for axis_item in axis:
+                    layout.prop(axis_item, "value", text=axis_name)
+            
+            with layout.row(True)(alert=not lock_same[axis_i]):
+                icon = ('LOCKED' if axis_lock else 'UNLOCKED')
+                layout.prop(self, axis_id+"_lock", text="", icon=icon, toggle=True)
 
 @addon.PropertyGroup
 class RotationPG(make_vector_base()):
@@ -649,6 +609,22 @@ class RotationPG(make_vector_base()):
     
     w = [FloatPG3] | prop()
     w_lock = False | prop()
+    
+    def safe_vector(self, vc):
+        return (0.0 if vc is None else vc)
+    def set_vector(self, i, v):
+        self.x[i].value = self.safe_vector(v[0])
+        self.y[i].value = self.safe_vector(v[1])
+        self.z[i].value = self.safe_vector(v[2])
+        self.w[i].value = self.safe_vector(v[3])
+    
+    def safe_lock(self, vc):
+        return (True if vc is None else vc)
+    def set_lock(self, v):
+        self.x_lock = self.safe_lock(v[0])
+        self.y_lock = self.safe_lock(v[1])
+        self.z_lock = self.safe_lock(v[2])
+        self.w_lock = self.safe_lock(v[3])
     
     def draw(self, layout, summaries, text, folded=False):
         with layout.row():
@@ -697,6 +673,20 @@ class ScalePG(make_vector_base()):
     z = [FloatPG3] | prop()
     z_lock = False | prop()
     
+    def safe_vector(self, vc):
+        return (0.0 if vc is None else vc)
+    def set_vector(self, i, v):
+        self.x[i].value = self.safe_vector(v[0])
+        self.y[i].value = self.safe_vector(v[1])
+        self.z[i].value = self.safe_vector(v[2])
+    
+    def safe_lock(self, vc):
+        return (True if vc is None else vc)
+    def set_lock(self, v):
+        self.x_lock = self.safe_lock(v[0])
+        self.y_lock = self.safe_lock(v[1])
+        self.z_lock = self.safe_lock(v[2])
+    
     def draw(self, layout, summaries, text, folded=False):
         with layout.row():
             with layout.fold(text, "row"):
@@ -737,6 +727,39 @@ class ObjectTransformPG:
     rotation = RotationPG | prop()
     scale = ScalePG | prop()
     dimensions = ScalePG | prop()
+    
+    def refresh(self, context, summaries, queries, coordsystem):
+        csm = CoordSystemMatrix(coordsystem)
+        
+        lock_queries = {"count", "same", "mean"}
+        
+        self.location.match_summaries(summaries)
+        aggr_location = VectorAggregator(3, 'NUMBER', queries)
+        aggr_location_lock = VectorAggregator(3, 'BOOL', lock_queries)
+        
+        for obj in context.selected_objects:
+            obj_LRS = csm.transform(context, obj)
+            
+            aggr_location.add(obj_LRS[0])
+            aggr_location_lock.add(obj.lock_location)
+        
+        obj = context.active_object
+        if obj:
+            obj_LRS = csm.transform(context, obj)
+        else:
+            obj_LRS = (Vector(), Quaternion(), Vector((1,1,1)))
+        
+        for i, summary in enumerate(summaries):
+            if summary == 'ACTIVE':
+                self.location.set_vector(i, obj_LRS[0])
+            else:
+                query = summary.lower()
+                self.location.set_vector(i, getattr(aggr_location, query))
+        
+        self.location["vector:same"] = aggr_location.same
+        
+        self.location.set_lock(aggr_location_lock.mean)
+        self.location["lock:same"] = aggr_location_lock.same
     
     def draw(self, layout, summaries):
         self.location.draw(layout, summaries, "Location", folded=False)
@@ -805,20 +828,32 @@ class ContextTransformPG:
         ('MEAN', "Mean", "", 'ROTATECENTER'),
         ('STDDEV', "StdDev", "", 'SMOOTHCURVE'),
         ('MEDIAN', "Median", "", 'SORTSIZE'),
-        ('MODE', "Mode", "", 'GROUP_VERTEX'),
+        #('MODE', "Mode", "", 'GROUP_VERTEX'),
     ]
     summaries = {'ACTIVE'} | prop("Summaries", items=summary_items)
     
+    use_pinned_coordsystem = False | prop()
     coordsystem_selector = CoordSystemPG | prop() # IDBlock selector
+    
     @property
     def coordsystem(self):
         manager = bpy.context.screen.coordsystem_manager
         return manager.coordsystems.get(self.coordsystem_selector.selector)
+    
     def draw_coordsystem_selector(self, layout):
+        manager = bpy.context.screen.coordsystem_manager
         if not self.coordsystem_selector.is_bound:
-            manager = bpy.context.screen.coordsystem_manager
             self.coordsystem_selector.bind(manager.coordsystems, rename=False)
-        self.coordsystem_selector.draw(layout)
+        
+        with layout.row(True):
+            icon = ('PINNED' if self.use_pinned_coordsystem else 'UNPINNED')
+            layout.prop(self, "use_pinned_coordsystem", text="", icon=icon, toggle=True)
+            if self.use_pinned_coordsystem:
+                self.coordsystem_selector.draw(layout)
+            else:
+                self.coordsystem_selector.selector = manager.coordsystem.selector
+                with layout.row(True)(enabled=False):
+                    self.coordsystem_selector.draw(layout)
     
     object = ObjectTransformPG | prop()
     mesh = MeshTransformPG | prop()
@@ -835,6 +870,20 @@ class ContextTransformPG:
     # Cursor isn't aggregated, but it still might be useful
     # to see/manipulate it in non-global coordsystem
     cursor = CursorTransformPG | prop()
+    
+    def refresh(self, context):
+        # Here we actually need them in order
+        summaries = [item[0] for item in self.summary_items if item[0] in self.summaries]
+        queries = set(("count", "same"))
+        queries.update(summary.lower() for summary in summaries if summary != 'ACTIVE')
+        
+        mode = context.mode
+        if mode == 'EDIT':
+            pass
+        elif mode == 'POSE':
+            pass
+        else: # OBJECT and others
+            self.object.refresh(context, summaries, queries, self.coordsystem)
     
     def draw(self, layout):
         self.draw_coordsystem_selector(layout)
@@ -890,6 +939,8 @@ class CategoryPG:
         # TODO
         if not self.transforms: # for now
             self.transforms.add() # for now
+        for transform in self.transforms:
+            transform.refresh(context)
         
         processing_time = time.clock() - processing_time
         # Disable autorefresh if it takes too much time
@@ -998,16 +1049,6 @@ def Operator_Refresh(self, context, event):
 
 @LeftRightPanel(idname="VIEW3D_PT_batch_{}".format(category_name_plural), space_type='VIEW_3D', category="Batch", label="Batch {}".format(Category_Name_Plural))
 class Panel_Category:
-    def draw_header(self, context):
-        layout = NestedLayout(self.layout)
-        category = get_category()
-        options = get_options()
-        #with layout.row(True)(scale_x=0.9):
-        #    icon = CategoryOptionsPG.search_in_icons[options.search_in]
-        #    layout.prop_menu_enum(options, "search_in", text="", icon=icon)
-        #    icon = CategoryOptionsPG.paste_mode_icons[options.paste_mode]
-        #    layout.prop_menu_enum(options, "paste_mode", text="", icon=icon)
-    
     def draw(self, context):
         layout = NestedLayout(self.layout)
         category = get_category()

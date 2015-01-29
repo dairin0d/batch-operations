@@ -29,7 +29,8 @@ from mathutils import Vector, Matrix, Quaternion, Euler, Color
 
 from .utils_python import next_catch, send_catch, ensure_baseclass, issubclass_safe, PrimitiveLock, AttributeHolder
 from .utils_text import compress_whitespace, indent
-from .utils_ui import messagebox, NestedLayout
+from .utils_ui import messagebox, NestedLayout, ui_context_under_coord
+from .utils_userinput import KeyMapUtils
 from .utils_accumulation import NumberAccumulator, VectorAccumulator, AxisAngleAccumulator, NormalAccumulator
 from .bpy_inspect import BpyProp, prop, BlEnums
 
@@ -47,6 +48,14 @@ class AddonManager:
     _ID_counter_key = "\x02{UUID-counter}\x03"
     
     _hack_classes_count = 0
+    
+    use_scene_update_pre = False
+    use_scene_update_post = False
+    use_background_jobs = False
+    
+    scene_update_pre = None
+    scene_update_post = None
+    background_jobs = []
     
     # ===== INITIALIZATION ===== #
     def __new__(cls, name=None, path=None, config=None):
@@ -645,10 +654,14 @@ class AddonManager:
         for callback in self.on_register:
             callback()
         
+        addons_registry.add(self)
+        
         self.status = 'REGISTERED'
     
     def unregister(self):
         self.status = 'UNREGISTRATION'
+        
+        addons_registry.remove(self)
         
         for callback in self.on_unregister:
             callback()
@@ -1741,7 +1754,8 @@ class IDBlockSelector:
             selfx = self._addon[self] # "self extended"
             idblocks = selfx.idblocks
             # references to items' strings must be kept in python!
-            selfx._item_names = [sys.intern(obj.name) for obj in idblocks.collection]
+            selfx._item_names = []
+            if idblocks is not None: selfx._item_names.extend(sys.intern(obj.name) for obj in idblocks.collection)
             items = []
             if self.show_empty or (not selfx._item_names): items.append((self.empty_name, "", ""))
             if idblocks is not None: items.extend((name, name, name) for name in selfx._item_names)
@@ -1974,3 +1988,149 @@ class IDBlockSelector:
                 if delete: layout.operator(delete, text="", icon='X')
 
 #============================================================================#
+
+if not hasattr(bpy.types, "BACKGROUND_OT_ui_monitor"):
+    class BACKGROUND_OT_ui_monitor(bpy.types.Operator):
+        bl_idname = "background.ui_monitor"
+        bl_label = "Background UI Monitor"
+        bl_options = {'INTERNAL'}
+        
+        _is_running = False
+        _script_reload_kmis = []
+        
+        mouse = (0, 0)
+        mouse_prev = (0, 0)
+        mouse_region = (0, 0)
+        mouse_context = None # can be None between areas, for example
+        
+        @classmethod
+        def activate(cls):
+            if cls._is_running: return
+            cls._is_running = True
+            bpy.ops.background.ui_monitor('INVOKE_DEFAULT')
+        
+        def invoke(self, context, event):
+            cls = self.__class__
+            cls._is_running = True
+            cls._script_reload_kmis = list(KeyMapUtils.search('script.reload'))
+            
+            wm = context.window_manager
+            wm.modal_handler_add(self)
+            
+            # 'RUNNING_MODAL' MUST be present if modal_handler_add is used!
+            return {'PASS_THROUGH', 'RUNNING_MODAL'}
+        
+        def cancel(self, context):
+            cls = self.__class__
+            cls._is_running = False
+        
+        def modal(self, context, event):
+            cls = self.__class__
+            
+            # Scripts cannot be reloaded while modal operators are running
+            # Intercept the corresponding event and shut down the monitor
+            # (it would be relaunched automatically afterwards)
+            for kc, km, kmi in cls._script_reload_kmis:
+                if KeyMapUtils.equal(kmi, event):
+                    self.cancel(context)
+                    return {'PASS_THROUGH', 'CANCELLED'}
+            
+            if 'MOUSEMOVE' in event.type: # MOUSEMOVE, INBETWEEN_MOUSEMOVE
+                cls.mouse = (event.mouse_x, event.mouse_y)
+                cls.mouse_prev = (event.mouse_prev_x, event.mouse_prev_y)
+                cls.mouse_region = (event.mouse_region_x, event.mouse_region_y)
+                cls.mouse_context = ui_context_under_coord(event.mouse_x, event.mouse_y)
+            
+            return {'PASS_THROUGH'}
+    
+    bpy.utils.register_class(BACKGROUND_OT_ui_monitor) # REGISTER
+
+class AddonsRegistry:
+    _scene_update_pre_key = "\x02{generic-addon-scene_update_pre}\x03"
+    _scene_update_post_key = "\x02{generic-addon-scene_update_post}\x03"
+    _addons_registry_key = "\x02{addons-registry}\x03"
+    
+    # AddonsRegistry is a singleton anyway, it's ok to use class-level collections
+    addons = {}
+    scene_update_pre = []
+    scene_update_post = []
+    background_jobs = []
+    
+    job_duration = 0.002
+    job_interval = job_duration * 5
+    job_next_update = 0.0
+    
+    def add(self, addon):
+        addon_key = (addon.module_name, addon.path)
+        self.addons[addon_key] = addon
+        
+        if addon.use_scene_update_pre: self.scene_update_pre.append(addon)
+        if addon.use_scene_update_post: self.scene_update_post.append(addon)
+        if addon.use_background_jobs: self.background_jobs.append(addon)
+    
+    def remove(self, addon):
+        addon_key = (addon.module_name, addon.path)
+        self.addons.pop(addon_key, None)
+        
+        if addon.use_scene_update_pre: self.scene_update_pre.remove(addon)
+        if addon.use_scene_update_post: self.scene_update_post.remove(addon)
+        if addon.use_background_jobs: self.background_jobs.remove(addon)
+    
+    def __new__(cls):
+        scene_update_pre = None
+        for callback in bpy.app.handlers.scene_update_pre:
+            if callback.__name__ == cls._scene_update_pre_key:
+                scene_update_pre = callback
+                break
+        
+        scene_update_post = None
+        for callback in bpy.app.handlers.scene_update_post:
+            if callback.__name__ == cls._scene_update_post_key:
+                scene_update_post = callback
+                break
+        
+        scene_update = scene_update_pre or scene_update_post
+        self = getattr(scene_update, cls._addons_registry_key, None)
+        if self is None: self = object.__new__(cls)
+        
+        if scene_update_pre is None:
+            @bpy.app.handlers.persistent
+            def scene_update_pre(scene):
+                for addon in self.scene_update_pre:
+                    addon.scene_update_pre(scene)
+            
+            scene_update_pre.__name__ = cls._scene_update_pre_key
+            setattr(scene_update_pre, cls._addons_registry_key, self)
+            
+            bpy.app.handlers.scene_update_pre.append(scene_update_pre)
+        
+        if scene_update_post is None:
+            @bpy.app.handlers.persistent
+            def scene_update_post(scene):
+                # We need to invoke the monitor from somewhere other than
+                # keymap event, since keymap event can lock the operator
+                # to the Preferences window. Scene update, on the other
+                # hand, is always in the main window.
+                bpy.types.BACKGROUND_OT_ui_monitor.activate()
+                
+                for addon in self.scene_update_post:
+                    addon.scene_update_post(scene)
+                
+                curr_time = time.clock()
+                if curr_time > self.job_next_update:
+                    self.job_next_update = curr_time + self.job_interval
+                    job_count = sum(len(addon.background_jobs) for addon in self.background_jobs)
+                    if job_count > 0:
+                        job_duration = self.job_duration / job_count
+                        for addon in self.background_jobs:
+                            for job in addon.background_jobs:
+                                job(job_duration)
+            
+            scene_update_post.__name__ = cls._scene_update_post_key
+            setattr(scene_update_post, cls._addons_registry_key, self)
+            
+            bpy.app.handlers.scene_update_post.append(scene_update_post)
+        
+        return self
+
+addons_registry = AddonsRegistry()

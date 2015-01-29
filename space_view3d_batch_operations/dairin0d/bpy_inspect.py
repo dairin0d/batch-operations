@@ -40,7 +40,8 @@ class BlEnums:
         'bl_height_default', 'bl_height_max', 'bl_height_min'}
     
     options = {tn:{item.identifier for item in getattr(bpy.types, tn).bl_rna.properties["bl_options"].enum_items}
-        for tn in ("KeyingSet", "KeyingSetInfo", "KeyingSetPath", "Macro", "Operator", "Panel")}
+        for tn in ("KeyingSet", "KeyingSetInfo", "KeyingSetPath", "Macro", "Operator", "Panel")
+        if "bl_options" in getattr(bpy.types, tn).bl_rna.properties} # Since 2.73a, KeyingSet and KeyingSetPath don't have bl_options
     
     space_types = {item.identifier for item in bpy.types.Space.bl_rna.properties["type"].enum_items}
     region_types = {item.identifier for item in bpy.types.Region.bl_rna.properties["type"].enum_items}
@@ -892,16 +893,14 @@ class BpyProp:
 class BpyOp:
     def __new__(cls, op):
         if isinstance(op, str):
-            if "." not in op: op = op.replace("_OT_", ".").lower()
+            if "." not in op: op = op.replace("_OT_", ".")
             op_parts = op.split(".")
-            category = getattr(bpy.ops, op_parts[-2])
-            op = getattr(category, op_parts[-1])
+            category = getattr(bpy.ops, op_parts[-2].lower())
+            op = getattr(category, op_parts[-1].lower())
         
         rna = BlRna(op)
         
-        # This seems to be the most straightforward way
-        # to check if the operator actually exists
-        # (hasattr(category, name) always returns True)
+        # Another way to check if operator exists is hasattr(bpy.types, "(CATEGORY)_OT_(idname)")
         if not rna: return None
         
         self = object.__new__(cls)
