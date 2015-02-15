@@ -118,18 +118,14 @@ def matrix_compose(*args):
 def matrix_decompose(m, res_size=None):
     size = len(m)
     axes = m.col # m.row
-    if res_size is None:
-        res_size = size
+    if res_size is None: res_size = size
     
-    if res_size == 2:
-        return (axes[0].to_2d(), axes[1].to_2d())
-    else:
-        x = axes[0].to_3d()
-        y = axes[1].to_3d()
-        z = (axes[2].to_3d() if size > 2 else Vector())
-        if res_size == 3:
-            return (x, y, z)
-        
-        t = (m.translation.to_3d() if size == 4 else Vector())
-        if res_size == 4:
-            return (x, y, z, t)
+    if res_size == 2: return (axes[0].to_2d(), axes[1].to_2d())
+    
+    x = axes[0].to_3d()
+    y = axes[1].to_3d()
+    z = (axes[2].to_3d() if size > 2 else Vector())
+    if res_size == 3: return (x, y, z)
+    
+    t = (m.translation.to_3d() if size == 4 else Vector())
+    if res_size == 4: return (x, y, z, t)

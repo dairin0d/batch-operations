@@ -17,6 +17,18 @@
 
 import traceback
 
+def setattr_cmp(obj, name, value):
+    "Utility function to avoid triggering updates when nothing changed"
+    if getattr(obj, name) == value: return
+    setattr(obj, name, value)
+
+def setitem_cmp(obj, key, value):
+    "Utility function to avoid triggering updates when nothing changed"
+    try:
+        if obj[name] != value: obj[name] = value
+    except KeyError:
+        obj[name] = value
+
 def reverse_enumerate(l):
     return zip(range(len(l)-1, -1, -1), reversed(l))
 
@@ -70,8 +82,7 @@ class AttributeHolder:
     
     def __getattr__(self, key):
         # This is primarily to be able to have some default values
-        if self.__original:
-            return getattr(self.__original, key)
+        if self.__original: return getattr(self.__original, key)
         raise AttributeError("attribute '%s' is not defined" % key)
     
     def __getitem__(self, key):
@@ -122,8 +133,7 @@ class SilentError:
     def __exit__(self, exc_type, exc_value, exc_traceback):
         if not isinstance(exc_value, self.catch): return
         self.value = exc_value
-        print("".join(traceback.format_exception(
-            exc_type, exc_value, exc_traceback)))
+        print("".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
         return True
 
 class PrimitiveLock(object):

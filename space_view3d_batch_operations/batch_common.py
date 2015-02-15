@@ -43,8 +43,6 @@ from {0}dairin0d.utils_addon import AddonManager
 
 addon = AddonManager()
 
-after_register_callbacks = []
-
 idnames_separator = "\t"
 
 def round_to_bool(v):

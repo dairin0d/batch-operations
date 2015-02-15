@@ -469,9 +469,8 @@ class Selection:
                     for item in items:
                         yield (item, sel_map[item.select])
         elif mode in {'EDIT_CURVE', 'EDIT_SURFACE'}:
-            total = 0
-            for spline in active_obj.data.splines:
-                total += len(spline.bezier_points) + len(spline.points)
+            total = sum(len(spline.bezier_points) + len(spline.points)
+                for spline in active_obj.data.splines)
             yield ([], None, total)
             
             bezier_sel_map = {
@@ -944,12 +943,79 @@ def IndividuallyActiveSelected(objects, context=None):
     
     prev_selection.restore()
 
+class ResumableSelection:
+    def __init__(self):
+        self.selection = Selection(container=frozenset)
+        self.selection_walker = None
+        self.selection_initialized = False
+        
+        # Screen change doesn't actually invalidate the selection,
+        # but it's a big enough change to justify the extra wait.
+        # I added it to make batch-transform a bit more efficient.
+        self.mode = ""
+        self.obj_hash = 0
+        self.screen_hash = 0
+        self.scene_hash = 0
+        self.undo_hash = 0
+    
+    def __call__(self, duration=0):
+        if duration is None: duration = float("inf")
+        context = bpy.context
+        mode = context.mode
+        obj_hash = (context.object.as_pointer() if context.object else 0)
+        screen_hash = context.screen.as_pointer()
+        scene_hash = context.scene.as_pointer()
+        undo_hash = bpy.data.as_pointer()
+        
+        reset = (self.mode != mode)
+        reset |= (self.obj_hash != obj_hash)
+        reset |= (self.screen_hash != screen_hash)
+        reset |= (self.scene_hash != scene_hash)
+        reset |= (self.undo_hash != undo_hash)
+        if reset:
+            self.mode = mode
+            self.obj_hash = obj_hash
+            self.screen_hash = screen_hash
+            self.scene_hash = scene_hash
+            self.undo_hash = undo_hash
+            
+            self.selection.bmesh = None
+            self.selection_walker = None
+        
+        clock = time.clock
+        time_stop = clock() + duration
+        
+        if self.selection_walker is None:
+            self.selection_walker = self.selection.walk()
+            self.selection_initialized = False
+            yield (-2, None) # RESET
+            if clock() > time_stop: return
+        
+        if not self.selection_initialized:
+            history, active, total = next(self.selection_walker, None)
+            if mode == 'EDIT_MESH': active = (history[-1] if history else None)
+            self.selection_initialized = True
+            yield (0, active) # ACTIVE
+            if clock() > time_stop: return
+        
+        for item in self.selection_walker:
+            if item[1]: yield (1, item[0]) # SELECTED
+            if clock() > time_stop: break
+        else: # the iterator is exhausted
+            self.selection_walker = None
+            yield (-1, None) # FINISHED
+    
+    RESET = -2
+    FINISHED = -1
+    ACTIVE = 0
+    SELECTED = 1
+
 # ============================ CHANGE MONITOR ============================== #
 #============================================================================#
 class ChangeMonitor:
     reports_cleanup_trigger = 512
     reports_cleanup_count = 128
-    max_evaluation_time = 0.01
+    max_evaluation_time = 0.002
     
     def __init__(self, context=None, update=True, **kwargs):
         if not context: context = bpy.context
@@ -957,6 +1023,7 @@ class ChangeMonitor:
         
         self.selection = Selection(container=frozenset)
         
+        self.mode = None
         self.active_obj = None
         self.selection_walker = None
         self.selection_recorded = False
@@ -970,6 +1037,7 @@ class ChangeMonitor:
         
         if update: self.update(context, **kwargs)
         
+        self.mode_changed = False
         self.active_obj_changed = False
         self.selection_changed = False
         self.scene_changed = False
@@ -1026,6 +1094,7 @@ class ChangeMonitor:
         return reports
     
     something_changed = property(lambda self:
+        self.mode_changed or
         self.active_obj_changed or
         self.selection_changed or
         self.scene_changed or
@@ -1044,6 +1113,7 @@ class ChangeMonitor:
         if not context: context = bpy.context
         wm = context.window_manager
         
+        self.mode_changed = False
         self.active_obj_changed = False
         self.selection_changed = False
         self.scene_changed = False
@@ -1052,8 +1122,13 @@ class ChangeMonitor:
         self.operators_changed = 0
         self.reports_changed = 0
         
+        mode = kwargs.get("mode") or context.mode
         active_obj = kwargs.get("object") or context.object
         scene = kwargs.get("scene") or context.scene
+        
+        if (self.mode != mode):
+            self.mode = mode
+            self.mode_changed = True
         
         if (self.active_obj != active_obj):
             self.active_obj = active_obj
@@ -1098,7 +1173,8 @@ class ChangeMonitor:
         self.selection_record_id = 0
     
     def analyze_selection(self):
-        reset_selection = self.active_obj_changed
+        reset_selection = self.mode_changed
+        reset_selection |= self.active_obj_changed
         reset_selection |= self.scene_changed
         reset_selection |= self.undo_performed
         reset_selection |= self.object_updated
@@ -1115,13 +1191,16 @@ class ChangeMonitor:
         if self.selection_walker is None:
             self.selection_walker = self.selection.walk()
         
+        clock = time.clock()
+        hash = self.hash
+        
         if self.selection_recorded:
-            time_stop = time.clock() + self.max_evaluation_time
+            time_stop = clock() + self.max_evaluation_time
             
             if self.selection_record_id == 0:
                 item = next(self.selection_walker, None)
                 history, active, total = item
-                item = tuple(self.hash(h) for h in history), self.hash(active), total
+                item = tuple(hash(h) for h in history), hash(active), total
                 self.selection_record_id = 1
                 if self.selection_recorder[0] != item:
                     #print("Active/history/total changed")
@@ -1132,7 +1211,7 @@ class ChangeMonitor:
             recorded_count = len(self.selection_recorder)
             for item in self.selection_walker:
                 if item[1]:
-                    item = self.hash(item[0]), item[1]
+                    item = hash(item[0]), item[1]
                     i = self.selection_record_id
                     if (i >= recorded_count) or (self.selection_recorder[i] != item):
                         #print("More than necessary or selection changed")
@@ -1140,7 +1219,7 @@ class ChangeMonitor:
                         self.reset_selection()
                         return
                     self.selection_record_id = i + 1
-                if time.clock() > time_stop: break
+                if clock() > time_stop: break
             else: # the iterator is exhausted
                 if self.selection_record_id < recorded_count:
                     #print("Less than necessary")
@@ -1150,20 +1229,20 @@ class ChangeMonitor:
                 self.selection_walker = None
                 self.selection_record_id = 0
         else:
-            time_stop = time.clock() + self.max_evaluation_time
+            time_stop = clock() + self.max_evaluation_time
             
             if self.selection_record_id == 0:
                 item = next(self.selection_walker, None)
                 history, active, total = item
-                item = tuple(self.hash(h) for h in history), self.hash(active), total
+                item = tuple(hash(h) for h in history), hash(active), total
                 self.selection_record_id = 1
                 self.selection_recorder.append(item) # first item is special
             
             for item in self.selection_walker:
                 if item[1]:
-                    item = self.hash(item[0]), item[1]
+                    item = hash(item[0]), item[1]
                     self.selection_recorder.append(item)
-                if time.clock() > time_stop: break
+                if clock() > time_stop: break
             else: # the iterator is exhausted
                 self.selection_walker = None
                 self.selection_recorded = True
