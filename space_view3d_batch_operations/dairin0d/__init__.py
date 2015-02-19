@@ -34,7 +34,7 @@ try:
     from . import utils_blender # uses bpy_inspect
     from . import utils_userinput # uses utils_python, bpy_inspect
     from . import utils_view3d # uses bpy_inspect, utils_math, utils_ui, utils_gl, utils_blender
-    from . import utils_addon # uses utils_python, utils_text, utils_ui, utils_accumulation, bpy_inspect
+    from . import utils_addon # uses utils_python, utils_text, utils_ui, bpy_inspect
 except Exception as exc:
     # For some reason errors that happen during dairin0d importing aren't automatically printed
     import traceback

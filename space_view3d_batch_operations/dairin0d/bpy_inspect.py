@@ -57,6 +57,7 @@ class BlEnums:
     object_types_editable = {'MESH', 'CURVE', 'SURFACE', 'META', 'FONT', 'ARMATURE', 'LATTICE'}
     object_types_geometry = {'MESH', 'CURVE', 'SURFACE', 'META', 'FONT'}
     object_types_with_modifiers = {'MESH', 'CURVE', 'SURFACE', 'FONT', 'LATTICE'}
+    object_types_with_vertices = {'MESH', 'CURVE', 'SURFACE', 'LATTICE'}
     
     object_mode_support = {
         'MESH':{'OBJECT', 'EDIT', 'SCULPT', 'VERTEX_PAINT', 'WEIGHT_PAINT', 'TEXTURE_PAINT', 'PARTICLE_EDIT',

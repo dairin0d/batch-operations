@@ -19,7 +19,7 @@ bl_info = {
     "name": "Batch Operations / Manager",
     "description": "Modifiers, Materials, Groups management / batch operations",
     "author": "dairin0d, moth3r",
-    "version": (0, 5, 5),
+    "version": (0, 5, 6),
     "blender": (2, 7, 0),
     "location": "View3D > Batch category in Tools panel",
     "warning": "",
@@ -67,10 +67,15 @@ from . import batch_transform
 addon = AddonManager()
 
 """
-// Temporary note:
-if item is property group instance and item["pi"] = 3.14,
-in UI it should be displayed like this: layout.prop(item, '["pi"]')
+Blender Bugs:
+* When several panels have menus/enums in their headers, moving the mouse over a menu item, behind which another menu is located, will immdeiately open that menu instead.
+* Quaternion() creates Quaternion((0,0,0,0)), which converts to Eluer((pi,0,0)), i.e. not a zero rotation. Is this intentional?
+* No API for directly getting the current manipulator position/rotation/matrix.
+* No API for getting/setting active element of curve/surface.
+* No API for getting/setting selected state metaball element.
+* No API for getting/setting active element of lattice.
 
+// Temporary note:
 TODO: make it possible to use separately different change-detecting mechanisms?
 
 Make sure copy/pasting doesn't crash Blender after Undo (seems like it doesn't crash, but pasted references to objects are invalid)
@@ -79,9 +84,6 @@ Make a general mechanism of serializing/deserializing links to ID blocks? (also 
 
 // add to addon "runtime" settings to hold python objects? (just for the convenience of accessing them from one place)
 
-investigate if it's possible to make a shortcut to jump to certain tab in tool shelf
-
-// seems like ANY menu/enum in panel header will have issues with background menus/enums (report a bug?)
 
 
 make Batch Materials work in edit mode?
@@ -93,23 +95,27 @@ preset system for modeling (sort of visual scripting/macro system)
 (able to change order and parameters and add/remove operations)
 apply to current selection or some vertex group(s)
 
+
+
+
+
 * Operators
     * Batch apply operator (search field)
     * operator's draw (if not defined, use automatic draw)
     * For: selection, visible, layer, scene, .blend
     * [DONE] Repeat last N actions
-* Object/Transform
+* Objects?
     * Batch rename with some sort of name pattern detection
     * Set layers
-    * Transform summary + ability to modify if possible
-    * Coordinate systems?
-    * Non-instant evaluation? Or, if determining the moment of change is possible, use instant evaluation?
     * single-click parenting: show a list of top-level objects? (i.e. without parents)
         * Actually there is a nice addon http://blenderaddonlist.blogspot.com/2014/06/addon-parent-to-empty.html
         * That could be shift+click or click operation for all selected objects depending on button.
+    * aggregate by object types?
+    * batch convert object type?
+    * replace a number of objects with some other object? (e.g. one type of screw with other type of screw)
     * moth3r suggested copy/pasting objects (in particular, so that pasting an object won't create duplicate materials)
     * copy/paste inside group? (in the selected batch groups)
-    * for transforms: see Apply menu (rot/pos/scale, visual transform, make duplicates real?)
+    * ? see Apply menu (rot/pos/scale, visual transform, make duplicates real?)
     * See also: https://github.com/sebastian-k/scripts/blob/master/power_snapping_pies.py (what of this is applicable to batch operations?)
 * Material slots?
     ...
@@ -133,10 +139,6 @@ apply to current selection or some vertex group(s)
     * replace/override some datas with another data (data type must be same)
     * some data-specific properties?
     * no add, no paste modes, no remove (? or remove the objects?), no "add"/"filter" assign actions
-* Objects?
-    * aggregate by object types?
-    * batch convert object type?
-    * replace a number of objects with some other object? (e.g. one type of screw with other type of screw)
 """
 
 #============================================================================#

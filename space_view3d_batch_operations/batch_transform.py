@@ -32,7 +32,7 @@ except ImportError:
     dairin0d_location = "."
 
 exec("""
-from {0}dairin0d.utils_math import matrix_compose, matrix_decompose
+from {0}dairin0d.utils_math import matrix_compose, matrix_decompose, matrix_inverted_safe
 from {0}dairin0d.utils_python import setattr_cmp, setitem_cmp
 from {0}dairin0d.utils_view3d import SmartView3D
 from {0}dairin0d.utils_blender import Selection
@@ -72,16 +72,28 @@ TODO:
 * Other modes
 * 3D cursor
 
+* VIEW coordsystem:
+    * this is better be independent for each 3D view, since manipulator/transform-orientation are per-3D-view anyway
+    * should be able to optionally specify a camera (if not specified, then last active 3D region is used)
+
+* make buttons to zero/reset objects' pos/rot/scale in current coordiante system
+  also: make sure it's possibe to invoke it via a keyboard shortcut
+
 Investigate:
 * moth3r asks if it's possible to rotate/scale around different point than each object's origin
 * Spatial queries? ("select all objects wich satisfy the following conditions")
 * Manhattan distance as one of the coordsys Space options?
+
+* "Transform box"? (for visual "box" transformation as seen in some other apps)
 
 ? "geometry" summary is too complicated to calculate in background (+ needs conversion to mesh anyway)
   but might be feasible as a on-request calculation
 
 From http://wiki.blender.org/index.php/Dev:Doc/Quick_Hacks
 - Use of 3d manipulator to move and scale Texture Space?
+
+see also: http://modo.docs.thefoundry.co.uk/modo/601/help/pages/modotoolbox/ActionCenters.html
+also: work plane?
 
 See Modo's Absolute Scaling
 https://www.youtube.com/watch?v=79BAHXLX9JQ
@@ -109,6 +121,546 @@ category_name_plural = Category_Name_Plural.lower()
 category_icon = 'MANIPUL'
 
 #============================================================================#
+
+
+# Particles are used in the following situations:
+# - as subjects of transformation
+# - as reference point(s) for cursor transformation
+# Note: particles 'dragged' by Proportional Editing
+# are a separate issue (they can come and go).
+def gather_particles(**kwargs):
+    context = kwargs.get("context", bpy.context)
+
+    area_type = kwargs.get("area_type", context.area.type)
+
+    scene = kwargs.get("scene", context.scene)
+
+    space_data = kwargs.get("space_data", context.space_data)
+    region_data = kwargs.get("region_data", context.region_data)
+
+    particles = []
+    pivots = {}
+    normal_system = None
+
+    active_element = None
+    cursor_pos = None
+    median = None
+
+    if area_type == 'VIEW_3D':
+        context_mode = kwargs.get("context_mode", context.mode)
+
+        selected_objects = kwargs.get("selected_objects",
+            context.selected_objects)
+
+        active_object = kwargs.get("active_object",
+            context.active_object)
+
+        if context_mode == 'OBJECT':
+            for obj in selected_objects:
+                particle = View3D_Object(obj)
+                particles.append(particle)
+
+            if active_object:
+                active_element = active_object.\
+                    matrix_world.to_translation()
+
+        # On Undo/Redo scene hash value is changed ->
+        # -> the monitor tries to update the CSU ->
+        # -> object.mode_set seem to somehow conflict
+        # with Undo/Redo mechanisms.
+        elif active_object and active_object.data and \
+        (context_mode in {
+        'EDIT_MESH', 'EDIT_METABALL',
+        'EDIT_CURVE', 'EDIT_SURFACE',
+        'EDIT_ARMATURE', 'POSE'}):
+
+            m = active_object.matrix_world
+
+            positions = []
+            normal = Vector((0, 0, 0))
+
+            if context_mode == 'EDIT_MESH':
+                bm = bmesh.from_edit_mesh(active_object.data)
+
+                if bm.select_history:
+                    elem = bm.select_history[-1]
+                    if isinstance(elem, bmesh.types.BMVert):
+                        active_element = elem.co.copy()
+                    else:
+                        active_element = Vector()
+                        for v in elem.verts:
+                            active_element += v.co
+                        active_element *= 1.0 / len(elem.verts)
+
+                for v in bm.verts:
+                    if v.select:
+                        positions.append(v.co)
+                        normal += v.normal
+
+                # mimic Blender's behavior (as of now,
+                # order of selection is ignored)
+                if len(positions) == 2:
+                    normal = positions[1] - positions[0]
+                elif len(positions) == 3:
+                    a = positions[0] - positions[1]
+                    b = positions[2] - positions[1]
+                    normal = a.cross(b)
+            elif context_mode == 'EDIT_METABALL':
+                active_elem = active_object.data.elements.active
+                if active_elem:
+                    active_element = active_elem.co.copy()
+                    active_element = active_object.\
+                        matrix_world * active_element
+
+                # Currently there is no API for element.select
+                #for element in active_object.data.elements:
+                #    if element.select:
+                #        positions.append(element.co)
+            elif context_mode == 'EDIT_ARMATURE':
+                # active bone seems to have the same pivot
+                # as median of the selection
+                '''
+                active_bone = active_object.data.edit_bones.active
+                if active_bone:
+                    active_element = active_bone.head + \
+                                     active_bone.tail
+                    active_element = active_object.\
+                        matrix_world * active_element
+                '''
+
+                for bone in active_object.data.edit_bones:
+                    if bone.select_head:
+                        positions.append(bone.head)
+                    if bone.select_tail:
+                        positions.append(bone.tail)
+            elif context_mode == 'POSE':
+                active_bone = active_object.data.bones.active
+                if active_bone:
+                    active_element = active_bone.\
+                        matrix_local.translation.to_3d()
+                    active_element = active_object.\
+                        matrix_world * active_element
+
+                # consider only topmost parents
+                bones = set()
+                for bone in active_object.data.bones:
+                    if bone.select:
+                        bones.add(bone)
+
+                parents = set()
+                for bone in bones:
+                    if not set(bone.parent_recursive).intersection(bones):
+                        parents.add(bone)
+
+                for bone in parents:
+                    positions.append(bone.matrix_local.translation.to_3d())
+            else:
+                for spline in active_object.data.splines:
+                    for point in spline.bezier_points:
+                        if point.select_control_point:
+                            positions.append(point.co)
+                        else:
+                            if point.select_left_handle:
+                                positions.append(point.handle_left)
+                            if point.select_right_handle:
+                                positions.append(point.handle_right)
+
+                        n = None
+                        nL = point.co - point.handle_left
+                        nR = point.co - point.handle_right
+                        #nL = point.handle_left.copy()
+                        #nR = point.handle_right.copy()
+                        if point.select_control_point:
+                            n = nL + nR
+                        elif point.select_left_handle or \
+                             point.select_right_handle:
+                            n = nL + nR
+                        else:
+                            if point.select_left_handle:
+                                n = -nL
+                            if point.select_right_handle:
+                                n = nR
+
+                        if n is not None:
+                            if n.length_squared < epsilon:
+                                n = -nL
+                            normal += n.normalized()
+
+                    for point in spline.points:
+                        if point.select:
+                            positions.append(point.co)
+
+            if len(positions) != 0:
+                if normal.length_squared < epsilon:
+                    normal = Vector((0, 0, 1))
+                normal.rotate(m)
+                normal.normalize()
+
+                if (1.0 - abs(normal.z)) < epsilon:
+                    t1 = Vector((1, 0, 0))
+                else:
+                    t1 = Vector((0, 0, 1)).cross(normal)
+                t2 = t1.cross(normal)
+                normal_system = MatrixCompose(t1, t2, normal)
+
+                median, bbox_center = calc_median_bbox_pivots(positions)
+                median = m * median
+                bbox_center = m * bbox_center
+
+                # Currently I don't know how to get active mesh element
+                if active_element is None:
+                    if context_mode == 'EDIT_ARMATURE':
+                        # Somewhy EDIT_ARMATURE has such behavior
+                        active_element = bbox_center
+                    else:
+                        active_element = median
+            else:
+                if active_element is None:
+                    active_element = active_object.\
+                        matrix_world.to_translation()
+
+                median = active_element
+                bbox_center = active_element
+
+                normal_system = active_object.matrix_world.to_3x3()
+                normal_system.col[0].normalize()
+                normal_system.col[1].normalize()
+                normal_system.col[2].normalize()
+        else:
+            # paint/sculpt, etc.?
+            particle = View3D_Object(active_object)
+            particles.append(particle)
+
+            if active_object:
+                active_element = active_object.\
+                    matrix_world.to_translation()
+
+        cursor_pos = get_cursor_location(v3d=space_data)
+
+    #elif area_type == 'IMAGE_EDITOR':
+        # currently there is no way to get UV editor's
+        # offset (and maybe some other parameters
+        # required to implement these operators)
+        #cursor_pos = space_data.uv_editor.cursor_location
+
+    #elif area_type == 'EMPTY':
+    #elif area_type == 'GRAPH_EDITOR':
+    #elif area_type == 'OUTLINER':
+    #elif area_type == 'PROPERTIES':
+    #elif area_type == 'FILE_BROWSER':
+    #elif area_type == 'INFO':
+    #elif area_type == 'SEQUENCE_EDITOR':
+    #elif area_type == 'TEXT_EDITOR':
+    #elif area_type == 'AUDIO_WINDOW':
+    #elif area_type == 'DOPESHEET_EDITOR':
+    #elif area_type == 'NLA_EDITOR':
+    #elif area_type == 'SCRIPTS_WINDOW':
+    #elif area_type == 'TIMELINE':
+    #elif area_type == 'NODE_EDITOR':
+    #elif area_type == 'LOGIC_EDITOR':
+    #elif area_type == 'CONSOLE':
+    #elif area_type == 'USER_PREFERENCES':
+
+    else:
+        print("gather_particles() not implemented for '{}'".format(area_type))
+        return None, None
+
+    # 'INDIVIDUAL_ORIGINS' is not handled here
+
+    if cursor_pos:
+        pivots['CURSOR'] = cursor_pos.copy()
+
+    if active_element:
+        # in v3d: ACTIVE_ELEMENT
+        pivots['ACTIVE'] = active_element.copy()
+
+    if (len(particles) != 0) and (median is None):
+        positions = (p.get_location() for p in particles)
+        median, bbox_center = calc_median_bbox_pivots(positions)
+
+    if median:
+        # in v3d: MEDIAN_POINT, in UV editor: MEDIAN
+        pivots['MEDIAN'] = median.copy()
+        # in v3d: BOUNDING_BOX_CENTER, in UV editor: CENTER
+        pivots['CENTER'] = bbox_center.copy()
+
+    csu = CoordinateSystemUtility(scene, space_data, region_data, \
+        pivots, normal_system)
+
+    return particles, csu
+
+def calc_median_bbox_pivots(positions):
+    median = None # pos can be 3D or 2D
+    bbox = [None, None]
+
+    n = 0
+    for pos in positions:
+        extend_bbox(bbox, pos)
+        try:
+            median += pos
+        except:
+            median = pos.copy()
+        n += 1
+
+    median = median / n
+    bbox_center = (Vector(bbox[0]) + Vector(bbox[1])) * 0.5
+
+    return median, bbox_center
+
+def extend_bbox(bbox, pos):
+    try:
+        bbox[0] = tuple(min(e0, e1) for e0, e1 in zip(bbox[0], pos))
+        bbox[1] = tuple(max(e0, e1) for e0, e1 in zip(bbox[1], pos))
+    except:
+        bbox[0] = tuple(pos)
+        bbox[1] = tuple(pos)
+
+
+# ====== COORDINATE SYSTEM UTILITY ====== #
+class CoordinateSystemUtility:
+    pivot_name_map = {
+        'CENTER':'CENTER',
+        'BOUNDING_BOX_CENTER':'CENTER',
+        'MEDIAN':'MEDIAN',
+        'MEDIAN_POINT':'MEDIAN',
+        'CURSOR':'CURSOR',
+        'INDIVIDUAL_ORIGINS':'INDIVIDUAL',
+        'ACTIVE_ELEMENT':'ACTIVE',
+        'WORLD':'WORLD',
+        'SURFACE':'SURFACE', # ?
+        'BOOKMARK':'BOOKMARK',
+    }
+    pivot_v3d_map = {
+        'CENTER':'BOUNDING_BOX_CENTER',
+        'MEDIAN':'MEDIAN_POINT',
+        'CURSOR':'CURSOR',
+        'INDIVIDUAL':'INDIVIDUAL_ORIGINS',
+        'ACTIVE':'ACTIVE_ELEMENT',
+    }
+
+    def __init__(self, scene, space_data, region_data, \
+                 pivots, normal_system):
+        self.space_data = space_data
+        self.region_data = region_data
+
+        if space_data.type == 'VIEW_3D':
+            self.pivot_map_inv = self.pivot_v3d_map
+
+        self.tou = TransformOrientationUtility(
+            scene, space_data, region_data)
+        self.tou.normal_system = normal_system
+
+        self.pivots = pivots
+
+        # Assigned by caller (for cursor or selection)
+        self.source_pos = None
+        self.source_rot = None
+        self.source_scale = None
+
+    def set_orientation(self, name):
+        self.tou.set(name)
+
+    def set_pivot(self, pivot):
+        self.space_data.pivot_point = self.pivot_map_inv[pivot]
+
+    def get_pivot_name(self, name=None, relative=None, raw=False):
+        pivot = self.pivot_name_map[self.space_data.pivot_point]
+        if raw:
+            return pivot
+
+        if not name:
+            name = self.tou.get()
+
+        if relative is None:
+            settings = find_settings()
+            tfm_opts = settings.transform_options
+            relative = tfm_opts.use_relative_coords
+
+        if relative:
+            pivot = "RELATIVE"
+        elif (name == 'GLOBAL') or (pivot == 'WORLD'):
+            pivot = 'WORLD'
+        elif (name == "Surface") or (pivot == 'SURFACE'):
+            pivot = "SURFACE"
+
+        return pivot
+
+    def get_origin(self, name=None, relative=None, pivot=None):
+        if not pivot:
+            pivot = self.get_pivot_name(name, relative)
+
+        if relative or (pivot == "RELATIVE"):
+            # "relative" parameter overrides "pivot"
+            return self.source_pos
+        elif pivot == 'WORLD':
+            return Vector()
+        elif pivot == "SURFACE":
+            runtime_settings = find_runtime_settings()
+            return Vector(runtime_settings.surface_pos)
+        else:
+            if pivot == 'INDIVIDUAL':
+                pivot = 'MEDIAN'
+
+            #if pivot == 'ACTIVE':
+            #    print(self.pivots)
+
+            try:
+                return self.pivots[pivot]
+            except:
+                return Vector()
+
+    def get_matrix(self, name=None, relative=None, pivot=None):
+        if not name:
+            name = self.tou.get()
+
+        matrix = self.tou.get_matrix(name)
+
+        if isinstance(pivot, Vector):
+            pos = pivot
+        else:
+            pos = self.get_origin(name, relative, pivot)
+
+        return to_matrix4x4(matrix, pos)
+
+# ====== TRANSFORM ORIENTATION UTILITIES ====== #
+class TransformOrientationUtility:
+    special_systems = {"Surface", "Scaled"}
+    predefined_systems = {
+        'GLOBAL', 'LOCAL', 'VIEW', 'NORMAL', 'GIMBAL',
+        "Scaled", "Surface",
+    }
+
+    def __init__(self, scene, v3d, rv3d):
+        self.scene = scene
+        self.v3d = v3d
+        self.rv3d = rv3d
+
+        self.custom_systems = [item for item in scene.orientations \
+            if item.name not in self.special_systems]
+
+        self.is_custom = False
+        self.custom_id = -1
+
+        # This is calculated elsewhere
+        self.normal_system = None
+
+        self.set(v3d.transform_orientation)
+
+    def get(self):
+        return self.transform_orientation
+
+    def get_title(self):
+        if self.is_custom:
+            return self.transform_orientation
+
+        name = self.transform_orientation
+        return name[:1].upper() + name[1:].lower()
+
+    def set(self, name, set_v3d=True):
+        if isinstance(name, int):
+            n = len(self.custom_systems)
+            if n == 0:
+                # No custom systems, do nothing
+                return
+
+            increment = name
+
+            if self.is_custom:
+                # If already custom, switch to next custom system
+                self.custom_id = (self.custom_id + increment) % n
+
+            self.is_custom = True
+
+            name = self.custom_systems[self.custom_id].name
+        else:
+            self.is_custom = name not in self.predefined_systems
+
+            if self.is_custom:
+                self.custom_id = next((i for i, v in \
+                    enumerate(self.custom_systems) if v.name == name), -1)
+
+            if name in self.special_systems:
+                # Ensure such system exists
+                self.get_custom(name)
+
+        self.transform_orientation = name
+
+        if set_v3d:
+            self.v3d.transform_orientation = name
+
+    def get_matrix(self, name=None):
+        active_obj = self.scene.objects.active
+
+        if not name:
+            name = self.transform_orientation
+
+        if self.is_custom:
+            matrix = self.custom_systems[self.custom_id].matrix.copy()
+        else:
+            if (name == 'VIEW') and self.rv3d:
+                matrix = self.rv3d.view_rotation.to_matrix()
+            elif name == "Surface":
+                matrix = self.get_custom(name).matrix.copy()
+            elif (name == 'GLOBAL') or (not active_obj):
+                matrix = Matrix().to_3x3()
+            elif (name == 'NORMAL') and self.normal_system:
+                matrix = self.normal_system.copy()
+            else:
+                matrix = active_obj.matrix_world.to_3x3()
+                if name == "Scaled":
+                    self.get_custom(name).matrix = matrix
+                else: # 'LOCAL', 'GIMBAL', ['NORMAL'] for now
+                    matrix[0].normalize()
+                    matrix[1].normalize()
+                    matrix[2].normalize()
+
+        return matrix
+
+    def get_custom(self, name):
+        try:
+            return self.scene.orientations[name]
+        except:
+            return create_transform_orientation(
+                self.scene, name, Matrix())
+
+# Is there a less cumbersome way to create transform orientation?
+def create_transform_orientation(scene, name=None, matrix=None):
+    active_obj = scene.objects.active
+    prev_mode = None
+
+    if active_obj:
+        prev_mode = active_obj.mode
+        bpy.ops.object.mode_set(mode='OBJECT')
+    else:
+        bpy.ops.object.add()
+
+    # ATTENTION! This uses context's scene
+    bpy.ops.transform.create_orientation()
+
+    tfm_orient = scene.orientations[-1]
+
+    if name is not None:
+        basename = name
+        i = 1
+        while name in scene.orientations:
+            name = "%s.%03i" % (basename, i)
+            i += 1
+        tfm_orient.name = name
+
+    if matrix:
+        tfm_orient.matrix = matrix.to_3x3()
+
+    if active_obj:
+        bpy.ops.object.mode_set(mode=prev_mode)
+    else:
+        bpy.ops.object.delete()
+
+    return tfm_orient
+
+################################################################################################
+################################################################################################
+################################################################################################
+
 
 def convert_obj_rotation(src_mode, q, aa, e, dst_mode, always4=False):
     if src_mode == dst_mode: # and coordsystem is 'BASIS'
@@ -168,6 +720,62 @@ def apply_obj_rotation(obj, R, mode):
             R = R.to_euler(obj.rotation_mode)
             obj.rotation_euler = R
 
+def get_vertex_pos(obj, i, undeformed=False):
+    if not obj: return Vector()
+    if obj.type == 'MESH':
+        v = obj.data.vertices[i]
+        return Vector(v.undeformed_co if undeformed else v.co)
+    elif obj.type in ('CURVE', 'SURFACE'):
+        for spline in obj.data.splines:
+            points = (spline.bezier_points if spline.type == 'BEZIER' else spline.points)
+            if i >= len(points):
+                i -= len(points)
+            else:
+                return Vector(points[i].co)
+    elif obj.type == 'LATTICE':
+        p = obj.data.points[i]
+        return Vector(v.co if undeformed else v.co_deform)
+    else:
+        return Vector()
+
+def get_world_matrix(obj, bone_name=""):
+    if not obj: return Matrix()
+    if bone_name:
+        obj = obj.id_data # in case obj is a PoseBone
+        if obj.type == 'ARMATURE':
+            bone = obj.pose.bones.get(bone_name)
+            if bone: return bone.matrix_world
+    return obj.matrix_world # works for Object, PoseBone
+
+def get_parent_matrix(obj):
+    if not obj: return Matrix()
+    parent = obj.parent
+    if not parent: return Matrix()
+    
+    parent_type = getattr(obj, "parent_type", 'OBJECT')
+    if parent_type == 'BONE': # NOT TESTED
+        parent_bone = parent.pose.bones.get(obj.parent_bone)
+        if not parent_bone: return parent.matrix_world
+        return parent_bone.matrix_world
+    elif parent_type == 'VERTEX': # NOT TESTED
+        v = get_vertex_pos(parent, obj.parent_vertices[0])
+        return Matrix.Translation(parent.matrix_world * v)
+    elif parent_type == 'VERTEX_3': # NOT TESTED
+        pm = parent.matrix_world
+        v0 = pm * get_vertex_pos(parent, obj.parent_vertices[0])
+        v1 = pm * get_vertex_pos(parent, obj.parent_vertices[1])
+        v2 = pm * get_vertex_pos(parent, obj.parent_vertices[2])
+        t = v0
+        x = v1 - v0
+        y = v2 - v0
+        z = x.cross(y)
+        return matrix_compose(x, y, z, t)
+    else:
+        # I don't know how CURVE and KEY are supposed to behave,
+        # so for now I just treat them the same as OBJECT/ARMATURE
+        # LATTICE isn't a rigid-body/affine transformation either
+        return parent.matrix_world
+
 class CoordSystemMatrix:
     def __init__(self, coordsys=None):
         self.update(coordsys)
@@ -187,17 +795,190 @@ class CoordSystemMatrix:
             self.S = ('GLOBAL', "", "")
             self.extra_matrix = Matrix()
     
-    def transform(self, context, obj, rotation_mode='QUATERNION', rotation4=False):
-        # For now -- just basis
+    # The "basis" location/rotation/scale can be used with objects and pose-bones
+    # (they have the same the transform-related attributes, even locks!)
+    # Meta-elements have pos/rot/scale too, but nothing more advanced.
+    # However, meta-elements can also be coerced to the same behavior, to some extent
+    
+    def get_view_camera_matrix_params(self, context):
+        mouse_context = UIMonitor.last_rv3d_context
+        sv = (SmartView3D(context, **mouse_context) if mouse_context else None)
+        if not sv: return (Matrix(), None)
+        return sv.matrix, sv
+    
+    def calc_matrix(self, context, obj):
+        pm = None
+        lm = None
+        am = None
+        vm = None
+        vp = None
         
-        L = obj.location.copy()
+        L_mode = self.L[0]
+        if L_mode == 'PARENT':
+            if not pm: pm = get_parent_matrix(obj)
+            t = pm.translation
+        elif L_mode == 'LOCAL':
+            if not lm: lm = get_world_matrix(obj)
+            t = lm.translation
+        elif L_mode == 'ACTIVE':
+            if not am: am = get_world_matrix(context.active_object)
+            t = am.translation
+        elif L_mode == 'VIEW':
+            if not vm: vm, vp = self.get_view_camera_matrix_params(context)
+            t = vm.translation
+        elif L_mode == 'OBJECT':
+            _obj = (context.scene.objects.get(self.L[1]) if self.L[1] else obj)
+            om = get_world_matrix(_obj, self.L[2])
+            t = om.translation
+        #('SURFACE', "Surface", "Raycasted position", 'EDIT'),
+        #('CURSOR', "Cursor", "3D cursor position", 'CURSOR'),
+        #('BOOKMARK', "Bookmark", "Bookmark position", 'BOOKMARKS'),
+        #('AVERAGE', "Average", "Average of selected items' positions", 'ROTATECENTER'),
+        #('CENTER', "Center", "Center of selected items' positions", 'ROTATE'),
+        #('MIN', "Min", "Minimum of selected items' positions", 'FRAME_PREV'),
+        #('MAX', "Max", "Maximum of selected items' positions", 'FRAME_NEXT'),
+        #('PIVOT', "Pivot", "Position of the transform manipulator", 'MANIPUL'),
+        elif L_mode == 'CURSOR':
+            t = context.scene.cursor_location
+        else: # GLOBAL, and fallback for some others
+            t = Vector()
         
-        R = convert_obj_rotation(obj.rotation_mode, obj.rotation_quaternion,
-            obj.rotation_axis_angle, obj.rotation_euler, rotation_mode, rotation4)
+        R_mode = self.R[0]
+        if R_mode == 'PARENT':
+            if not pm: pm = get_parent_matrix(obj)
+            x, y, z = pm.col[:3]
+        elif R_mode == 'LOCAL':
+            if not lm: lm = get_world_matrix(obj)
+            x, y, z = lm.col[:3]
+        elif R_mode == 'ACTIVE':
+            if not am: am = get_world_matrix(context.active_object)
+            x, y, z = am.col[:3]
+        elif R_mode == 'VIEW':
+            if not vm: vm, vp = self.get_view_camera_matrix_params(context)
+            x, y, z = vm.col[:3]
+        elif R_mode == 'OBJECT':
+            _obj = (context.scene.objects.get(self.R[1]) if self.R[1] else obj)
+            om = get_world_matrix(_obj, self.R[2])
+            x, y, z = om.col[:3]
+        #('SURFACE', "Surface", "Orientation aligned to the raycasted normal/tangents", 'EDIT'),
+        #('NORMAL', "Normal", "Orientation aligned to the average of elements' normals or bones' Y-axes", 'SNAP_NORMAL'),
+        #('GIMBAL', "Gimbal", "Orientation aligned to the Euler rotation axes", 'NDOF_DOM'),
+        #('ORIENTATION', "Orientation", "Specified orientation", 'MANIPUL'),
+        else: # GLOBAL, and fallback for some others
+            x, y, z = Vector((1,0,0)), Vector((0,1,0)), Vector((0,0,1))
         
-        S = obj.scale.copy()
+        S_mode = self.S[0]
+        if S_mode == 'PARENT':
+            if not pm: pm = get_parent_matrix(obj)
+            s = pm.to_scale()
+        elif S_mode == 'LOCAL':
+            if not lm: lm = get_world_matrix(obj)
+            s = lm.to_scale()
+        elif S_mode == 'ACTIVE':
+            if not am: am = get_world_matrix(context.active_object)
+            s = am.to_scale()
+        elif S_mode == 'VIEW':
+            if not vm: vm, vp = self.get_view_camera_matrix_params(context)
+            s = vm.to_scale()
+        elif S_mode == 'OBJECT':
+            _obj = (context.scene.objects.get(self.S[1]) if self.S[1] else obj)
+            om = get_world_matrix(_obj, self.S[2])
+            s = om.to_scale()
+        #('RANGE', "Range", "Use bounding box dimensions as the scale of each axis", 'BBOX'),
+        #('STDDEV', "Deviation", "Use standard deviation as the scale of the system", 'STICKY_UVS_DISABLE'),
+        else: # GLOBAL, and fallback for some others
+            s = Vector((1,1,1))
+        
+        x = s.x * x.to_3d().normalized()
+        y = s.y * y.to_3d().normalized()
+        z = s.z * z.to_3d().normalized()
+        
+        final_matrix = matrix_compose(x, y, z, t) * self.extra_matrix
+        return (L_mode, R_mode, S_mode, final_matrix)
+    
+    def get_LRS(self, context, obj, rotation_mode='QUATERNION', rotation4=False):
+        L_mode, R_mode, S_mode, to_m = self.calc_matrix(context, obj)
+        in_m = matrix_inverted_safe(to_m) * get_world_matrix(obj)
+        
+        if L_mode == 'BASIS':
+            L = Vector(obj.location)
+        elif L_mode == 'LOCAL':
+            L = Vector()
+        else:
+            L = in_m.translation
+        
+        if R_mode == 'BASIS':
+            R = convert_obj_rotation(obj.rotation_mode, obj.rotation_quaternion,
+                obj.rotation_axis_angle, obj.rotation_euler, rotation_mode, rotation4)
+        elif R_mode == 'LOCAL':
+            R = convert_obj_rotation('QUATERNION', Quaternion((1,0,0,0)),
+                None, None, rotation_mode, rotation4)
+        else:
+            R = convert_obj_rotation('QUATERNION', in_m.to_quaternion(),
+                None, None, rotation_mode, rotation4)
+        
+        if S_mode == 'BASIS':
+            S = Vector(obj.scale)
+        elif S_mode == 'LOCAL':
+            S = Vector((1,1,1))
+        else:
+            S = in_m.to_scale()
         
         return (L, R, S)
+    
+    def set_LRS(self, context, obj, LRS, rotation_mode='QUATERNION'):
+        L, R, S = LRS
+        L_mode, R_mode, S_mode, to_m = self.calc_matrix(context, obj)
+        
+        mL = (L is not None) and (L_mode != 'BASIS')
+        mR = (R is not None) and (R_mode != 'BASIS')
+        mS = (S is not None) and (S_mode != 'BASIS')
+        
+        if mL or mR or mS:
+            in_m = None
+            
+            if not mL:
+                if not in_m: in_m = matrix_inverted_safe(to_m) * get_world_matrix(obj)
+                in_L = in_m.to_translation()
+            else:
+                in_L = Vector(L)
+                L = None
+            
+            if not mR:
+                if not in_m: in_m = matrix_inverted_safe(to_m) * get_world_matrix(obj)
+                in_R = in_m.to_quaternion()
+                if not R: rotation_mode = obj.rotation_mode
+            else:
+                if rotation_mode == 'QUATERNION':
+                    in_R = Quaternion(R)
+                elif rotation_mode == 'AXIS_ANGLE':
+                    in_R = Quaternion(R[1:], R[0])
+                else:
+                    if (len(R) == 4): R = R[1:]
+                    in_R = Euler(R).to_quaternion()
+                R = None
+            
+            if not mS:
+                if not in_m: in_m = matrix_inverted_safe(to_m) * get_world_matrix(obj)
+                in_S = in_m.to_scale()
+            else:
+                in_S = Vector(S)
+                S = None
+            
+            #print((in_L, in_R, in_S, mL, mR, mS))
+            
+            x, y, z = in_R.to_matrix().col
+            in_m = matrix_compose(x*in_S.x, y*in_S.y, z*in_S.z, in_L)
+            obj.matrix_world = to_m * in_m
+            
+            if (not mL) and (not L): L = Vector(obj.location)
+            if (not mR) and (not R): R = convert_obj_rotation(obj.rotation_mode, obj.rotation_quaternion,
+                obj.rotation_axis_angle, obj.rotation_euler, rotation_mode)
+            if (not mS) and (not S): S = Vector(obj.scale)
+        
+        if L: obj.location = Vector(L)
+        if R: apply_obj_rotation(obj, R, rotation_mode)
+        if S: obj.scale = Vector(S)
 
 #@addon.PropertyGroup
 @addon.IDBlock(name="Coordsys", icon='MANIPUL', show_empty=False)
@@ -454,11 +1235,8 @@ class TransformAggregator:
         self.csm = csm
         self.queries = set(("count", "same"))
         
-        mode = context.mode
-        if mode.startswith('EDIT') or (mode == 'POSE'):
-            self.mode = mode
-        else: # OBJECT and others
-            self.mode = 'OBJECT'
+        self.mode = context.mode
+        self.is_pose = (self.mode == 'POSE')
         
         self.process_active = getattr(self, self.mode+"_process_active", self._dummy)
         self.process_selected = getattr(self, self.mode+"_process_selected", self._dummy)
@@ -467,6 +1245,8 @@ class TransformAggregator:
         self.store = getattr(self, self.mode+"_store", self._dummy)
         self.restore = getattr(self, self.mode+"_restore", self._dummy)
         self.lock = getattr(self, self.mode+"_lock", self._dummy)
+        
+        self.set_prop = getattr(self, self.mode+"_set_prop", self._set_prop)
     
     def _dummy(self, *args, **kwargs):
         pass
@@ -492,7 +1272,7 @@ class TransformAggregator:
             vector[axis_index] = vector_new[axis_index]
             return vector
     
-    def set_prop(self, context, prop_name, value, avoid_errors=True):
+    def _set_prop(self, context, prop_name, value, avoid_errors=True):
         for obj, select_names in Selection():
             if (not avoid_errors) or hasattr(obj, prop_name):
                 setattr(obj, prop_name, value)
@@ -501,39 +1281,45 @@ class TransformAggregator:
     def OBJECT_store(self, context):
         self.stored = []
         for obj, select_names in Selection():
+            obj_LRS = self.csm.get_LRS(context, obj, self.rotation_mode, True)
+            
             params = dict(
+                L = obj_LRS[0],
+                R = obj_LRS[1],
+                S = obj_LRS[2],
+                M = Matrix(obj.matrix_world),
                 location = Vector(obj.location),
                 rotation_axis_angle = Vector(obj.rotation_axis_angle),
                 rotation_euler = Vector(obj.rotation_euler),
                 rotation_quaternion = Vector(obj.rotation_quaternion),
                 scale = Vector(obj.scale),
-                dimensions = Vector(obj.dimensions),
+                dimensions = (Vector(obj.dimensions) if not self.is_pose else None),
             )
             self.stored.append((obj, params))
     
     def OBJECT_restore(self, context, vector_name, axis_index, uniformity, vector_new, vector_delta, vector_scale, vector_ref):
-        print((vector_name, vector_delta))
-        
         for obj, params in self.stored:
+            # Applying both matrix and loc/rot/scale is a necessary measure:
+            # * world matrix does not seem to be immediately updated by the basis loc/rot/scale,
+            #   so we need to memorize and restore its original value
+            # * we need non-changed basis values to stay exactly as they were (e.g. eulers can be > 180)
+            obj.matrix_world = params["M"]
             obj.location = params["location"]
             obj.rotation_axis_angle = params["rotation_axis_angle"]
             obj.rotation_euler = params["rotation_euler"]
             obj.rotation_quaternion = params["rotation_quaternion"]
             obj.scale = params["scale"]
-            #obj.dimensions = params["dimensions"]
             
-            # For now - ignore coordsystem
-            obj_LRS = self.csm.transform(context, obj, self.rotation_mode, True)
             if vector_name == "location":
-                obj.location = self.modify_vector(params["location"], axis_index, uniformity, vector_new, vector_delta, vector_scale, vector_ref)
+                L = self.modify_vector(params["L"], axis_index, uniformity, vector_new, vector_delta, vector_scale, vector_ref)
+                self.csm.set_LRS(context, obj, (L, None, None))
             elif vector_name == "rotation":
-                rotation = convert_obj_rotation(obj.rotation_mode, params["rotation_quaternion"],
-                    params["rotation_axis_angle"], params["rotation_euler"], self.rotation_mode, True)
-                rotation = self.modify_vector(rotation, axis_index, uniformity, vector_new, vector_delta, vector_scale, vector_ref)
-                apply_obj_rotation(obj, rotation, self.rotation_mode)
+                R = self.modify_vector(params["R"], axis_index, uniformity, vector_new, vector_delta, vector_scale, vector_ref)
+                self.csm.set_LRS(context, obj, (None, R, None), self.rotation_mode)
             elif vector_name == "scale":
-                obj.scale = self.modify_vector(params["scale"], axis_index, uniformity, vector_new, vector_delta, vector_scale, vector_ref)
-            elif vector_name == "dimensions":
+                S = self.modify_vector(params["S"], axis_index, uniformity, vector_new, vector_delta, vector_scale, vector_ref)
+                self.csm.set_LRS(context, obj, (None, None, S))
+            elif (vector_name == "dimensions") and (not self.is_pose):
                 # Important: use the copied data, not obj.dimensions directly (or there will be glitches)
                 obj.dimensions = self.modify_vector(params["dimensions"], axis_index, uniformity, vector_new, vector_delta, vector_scale, vector_ref)
     
@@ -555,7 +1341,7 @@ class TransformAggregator:
         lock_queries = {"count", "same", "mean"}
         rotation_mode_queries = {"count", "same", "modes"}
         
-        self.default_LRS = (Vector(), Quaternion(), Vector((1,1,1)))
+        self.default_LRS = (Vector(), Quaternion((1,0,0,0)), Vector((1,1,1)))
         
         self.location = Vector()
         self.rotation = Vector.Fill(4)
@@ -576,15 +1362,15 @@ class TransformAggregator:
         self.aggr_dimensions = VectorAggregator(3, 'NUMBER', self.queries)
     
     def OBJECT_process_active(self, context, obj):
-        obj_LRS = (self.csm.transform(context, obj, self.last_rotation_mode, True) if obj else self.default_LRS)
+        obj_LRS = (self.csm.get_LRS(context, obj, self.last_rotation_mode, True) if obj else self.default_LRS)
         
         self.location = obj_LRS[0]
         self.rotation = obj_LRS[1]
         self.scale = obj_LRS[2]
-        self.dimensions = (Vector(obj.dimensions) if obj else Vector())
+        self.dimensions = (Vector(obj.dimensions) if obj and (not self.is_pose) else Vector())
     
     def OBJECT_process_selected(self, context, obj):
-        obj_LRS = self.csm.transform(context, obj, self.last_rotation_mode, True)
+        obj_LRS = self.csm.get_LRS(context, obj, self.last_rotation_mode, True)
         
         self.aggr_location.add(obj_LRS[0])
         self.aggr_location_lock.add(obj.lock_location)
@@ -598,7 +1384,7 @@ class TransformAggregator:
         self.aggr_scale.add(obj_LRS[2])
         self.aggr_scale_lock.add(obj.lock_scale)
         
-        self.aggr_dimensions.add(obj.dimensions)
+        if not self.is_pose: self.aggr_dimensions.add(obj.dimensions)
     
     last_rotation_mode = 'XYZ'
     def OBJECT_finish(self):
@@ -606,6 +1392,17 @@ class TransformAggregator:
         if self.aggr_rotation_mode.modes:
             cls.last_rotation_mode = self.aggr_rotation_mode.modes[0]
         self.rotation_mode = self.last_rotation_mode # make sure we have a local copy
+    # ====================================================================== #
+    
+    # Currently, POSE aggregate attributes are exactly the same as OBJECT's,
+    # except for the dimensions, and child-bones' Location displayed as inactive.
+    POSE_store = OBJECT_store
+    POSE_restore = OBJECT_restore
+    POSE_lock = OBJECT_lock
+    POSE_init = OBJECT_init
+    POSE_process_active = OBJECT_process_active
+    POSE_process_selected = OBJECT_process_selected
+    POSE_finish = OBJECT_finish
     # ====================================================================== #
     
     tfm_aggr_map = {}
@@ -675,6 +1472,7 @@ def ui_monitor(context, event, UIMonitor):
 def SummaryValuePG(default, representations, **kwargs):
     tooltip = "Click: independent, Shift+Click: offset, Alt+Click: proportional, Ctrl+Click or Shift+Alt+Click: equal"
     kwargs = dict(kwargs, description=(kwargs.get("description", "")+tooltip))
+    if "update" not in kwargs: kwargs["update"] = True
     
     @addon.PropertyGroup
     class cls:
@@ -733,8 +1531,8 @@ def SummaryValuePG(default, representations, **kwargs):
 def LockPG(default_uniformity=False):
     @addon.PropertyGroup
     class cls:
-        lock_uniformity = default_uniformity | -prop()
-        lock_transformation = False | -prop()
+        lock_uniformity = default_uniformity | -prop(update=True)
+        lock_transformation = False | -prop(update=True)
         
         def _get(self):
             return self.lock_uniformity
@@ -754,7 +1552,7 @@ def LockPG(default_uniformity=False):
 
 @addon.PropertyGroup
 class Lock4dPG:
-    lock_4d = False | -prop()
+    lock_4d = False | -prop(update=True)
     
     def _get(self):
         return self.lock_4d
@@ -779,7 +1577,7 @@ class RotationModePG:
         ('ZYX', "ZYX Euler", "ZYX Rotation Order - prone to Gimbal Lock"),
         ('AXIS_ANGLE', "Axis Angle", "Axis Angle (W+XYZ), defines a rotation around some axis defined by 3D-Vector"),
     ]
-    mode = 'XYZ' | -prop(items=items)
+    mode = 'XYZ' | -prop(items=items, update=True)
     
     # Note: the Enum get/set methods must return ints instead of strings/sets
     def _get(self):
@@ -800,20 +1598,23 @@ def SummaryVectorPG(title, axes, is_rotation=False, folded=False):
             return tuple(getattr(self, axis_name)[si].value for axis_name in self.axis_names)
         def set_vector(self, si, value):
             for i, axis_name in enumerate(self.axis_names):
-                getattr(self, axis_name)[si].value = value[i]
+                #getattr(self, axis_name)[si].value = value[i]
+                setattr_cmp(getattr(self, axis_name)[si], "value", value[i])
         
         def _get_lock_uniformity(self):
             return tuple(getattr(self, axis_name+"_lock").lock_uniformity for axis_name in self.axis_names)
         def _set_lock_uniformity(self, value):
             for i, axis_name in enumerate(self.axis_names):
-                getattr(self, axis_name+"_lock").lock_uniformity = value[i]
+                #getattr(self, axis_name+"_lock").lock_uniformity = value[i]
+                setattr_cmp(getattr(self, axis_name+"_lock"), "lock_uniformity", value[i])
         lock_uniformity = property(_get_lock_uniformity, _set_lock_uniformity)
         
         def _get_lock_transformation(self):
             return tuple(getattr(self, axis_name+"_lock").lock_transformation for axis_name in self.axis_names)
         def _set_lock_transformation(self, value):
             for i, axis_name in enumerate(self.axis_names):
-                getattr(self, axis_name+"_lock").lock_transformation = value[i]
+                #getattr(self, axis_name+"_lock").lock_transformation = value[i]
+                setattr_cmp(getattr(self, axis_name+"_lock"), "lock_transformation", value[i])
         lock_transformation = property(_get_lock_transformation, _set_lock_transformation)
         
         def match_summaries(self, summaries, axis=None):
@@ -875,7 +1676,8 @@ def SummaryVectorPG(title, axes, is_rotation=False, folded=False):
                     for i in range(len(self.axis_names)):
                         self.draw_axis(layout, summaries, i, self.axis_names[i], self.axis_subtypes[i][0])
                 else:
-                    is_euler = (self.mode.mode not in ('QUATERNION', 'AXIS_ANGLE'))
+                    rotation_mode = self.mode.mode
+                    is_euler = (rotation_mode not in ('QUATERNION', 'AXIS_ANGLE'))
                     w4d_lock_same = self.get("w4d_lock:same", True)
                     mode_same = self.get("mode:same", True)
                     
@@ -885,7 +1687,7 @@ def SummaryVectorPG(title, axes, is_rotation=False, folded=False):
                         self.draw_axis(layout, summaries, 2, "y", "angle")
                         self.draw_axis(layout, summaries, 3, "z", "angle")
                     else:
-                        if self.mode == 'QUATERNION':
+                        if rotation_mode == 'QUATERNION':
                             self.draw_axis(layout, summaries, 0, "w", "none", self.w4d_lock.lock_4d)
                         else:
                             self.draw_axis(layout, summaries, 0, "w", "angle", self.w4d_lock.lock_4d)
@@ -906,31 +1708,8 @@ def SummaryVectorPG(title, axes, is_rotation=False, folded=False):
 def safe_vector(v, fallback):
     return tuple((fallback if vc is None else vc) for vc in v)
 
-@addon.PropertyGroup
-class ObjectTransformPG:
-    vector_names = ["location", "rotation", "scale", "dimensions"]
-    
-    location = SummaryVectorPG("Location", [
-        ("x", 0.0, False, [dict(subtype='DISTANCE', unit='LENGTH')], dict(precision=5)),
-        ("y", 0.0, False, [dict(subtype='DISTANCE', unit='LENGTH')], dict(precision=5)),
-        ("z", 0.0, False, [dict(subtype='DISTANCE', unit='LENGTH')], dict(precision=5)),
-    ]) | prop()
-    rotation = SummaryVectorPG("Rotation", [
-        ("w", 0.0, True, [dict(subtype='NONE'), dict(name="\u03B1", subtype='ANGLE', unit='ROTATION')], dict(precision=3)),
-        ("x", 0.0, False, [dict(subtype='NONE'), dict(subtype='ANGLE', unit='ROTATION')], dict(precision=3)),
-        ("y", 0.0, False, [dict(subtype='NONE'), dict(subtype='ANGLE', unit='ROTATION')], dict(precision=3)),
-        ("z", 0.0, False, [dict(subtype='NONE'), dict(subtype='ANGLE', unit='ROTATION')], dict(precision=3)),
-    ], True) | prop()
-    scale = SummaryVectorPG("Scale", [
-        ("x", 0.0, False, [dict(subtype='NONE')], dict(precision=3)),
-        ("y", 0.0, False, [dict(subtype='NONE')], dict(precision=3)),
-        ("z", 0.0, False, [dict(subtype='NONE')], dict(precision=3)),
-    ]) | prop()
-    dimensions = SummaryVectorPG("Dimensions", [
-        ("x", 0.0, False, [dict(subtype='DISTANCE', unit='LENGTH')], dict(precision=3, min=0)),
-        ("y", 0.0, False, [dict(subtype='DISTANCE', unit='LENGTH')], dict(precision=3, min=0)),
-        ("z", 0.0, False, [dict(subtype='DISTANCE', unit='LENGTH')], dict(precision=3, min=0)),
-    ]) | prop()
+class BaseTransformPG:
+    vector_names = tuple()
     
     def begin(self, transform, vector_name, axis_name, summary_index, uniformity):
         selfx = addon[self]
@@ -1107,49 +1886,94 @@ class ObjectTransformPG:
                 vector_prop.lock_transformation = safe_vector(lock_aggr.mean, False)
                 vector_prop["lock:same"] = lock_aggr.same
         
-        # Non-generic stuff
-        self.rotation.w4d_lock.lock_4d = round_to_bool(tfm_aggr.aggr_rotation_lock_4d.mean)
-        self.rotation["w4d_lock:same"] = tfm_aggr.aggr_rotation_lock_4d.same
-        
-        if tfm_aggr.aggr_rotation_mode.modes:
-            self.rotation.mode.mode = tfm_aggr.aggr_rotation_mode.modes[0]
-        else:
-            self.rotation.mode.mode = 'XYZ'
-        self.rotation["mode:same"] = tfm_aggr.aggr_rotation_mode.same
+        self.apply_special_cases(tfm_aggr)
+    
+    def apply_special_cases(self, tfm_aggr):
+        pass
     
     def draw(self, layout, summaries):
         for vector_name in self.vector_names:
             getattr(self, vector_name).draw(layout, summaries)
+        self.draw_special_cases(layout)
+    
+    def draw_special_cases(self, layout):
+        pass
 
-@addon.PropertyGroup
+# Note: bpy properties only work when declared in the actually registered class, so I have to use mixins.
+class BaseLRSTransformPG(BaseTransformPG):
+    vector_names = ("location", "rotation", "scale")
+    
+    location = SummaryVectorPG("Location", [
+        ("x", 0.0, False, [dict(subtype='DISTANCE', unit='LENGTH')], dict(precision=5)),
+        ("y", 0.0, False, [dict(subtype='DISTANCE', unit='LENGTH')], dict(precision=5)),
+        ("z", 0.0, False, [dict(subtype='DISTANCE', unit='LENGTH')], dict(precision=5)),
+    ]) | prop()
+    rotation = SummaryVectorPG("Rotation", [
+        ("w", 0.0, True, [dict(subtype='NONE'), dict(name="\u03B1", subtype='ANGLE', unit='ROTATION')], dict(precision=3)),
+        ("x", 0.0, False, [dict(subtype='NONE'), dict(subtype='ANGLE', unit='ROTATION')], dict(precision=3)),
+        ("y", 0.0, False, [dict(subtype='NONE'), dict(subtype='ANGLE', unit='ROTATION')], dict(precision=3)),
+        ("z", 0.0, False, [dict(subtype='NONE'), dict(subtype='ANGLE', unit='ROTATION')], dict(precision=3)),
+    ], True) | prop()
+    scale = SummaryVectorPG("Scale", [
+        ("x", 0.0, False, [dict(subtype='NONE')], dict(precision=3)),
+        ("y", 0.0, False, [dict(subtype='NONE')], dict(precision=3)),
+        ("z", 0.0, False, [dict(subtype='NONE')], dict(precision=3)),
+    ]) | prop()
+    
+    def apply_special_cases(self, tfm_aggr):
+        #self.rotation.w4d_lock.lock_4d = round_to_bool(tfm_aggr.aggr_rotation_lock_4d.mean)
+        setattr_cmp(self.rotation.w4d_lock, "lock_4d", round_to_bool(tfm_aggr.aggr_rotation_lock_4d.mean))
+        self.rotation["w4d_lock:same"] = tfm_aggr.aggr_rotation_lock_4d.same
+        
+        if tfm_aggr.aggr_rotation_mode.modes:
+            #self.rotation.mode.mode = tfm_aggr.aggr_rotation_mode.modes[0]
+            setattr_cmp(self.rotation.mode, "mode", tfm_aggr.aggr_rotation_mode.modes[0])
+        else:
+            #self.rotation.mode.mode = 'XYZ'
+            setattr_cmp(self.rotation.mode, "mode", 'XYZ')
+        self.rotation["mode:same"] = tfm_aggr.aggr_rotation_mode.same
+
+class BaseLRSDTransformPG(BaseLRSTransformPG):
+    vector_names = ("location", "rotation", "scale", "dimensions")
+    dimensions = SummaryVectorPG("Dimensions", [
+        ("x", 0.0, False, [dict(subtype='DISTANCE', unit='LENGTH')], dict(precision=3, min=0)),
+        ("y", 0.0, False, [dict(subtype='DISTANCE', unit='LENGTH')], dict(precision=3, min=0)),
+        ("z", 0.0, False, [dict(subtype='DISTANCE', unit='LENGTH')], dict(precision=3, min=0)),
+    ]) | prop()
+
+@addon.PropertyGroup(mixins=BaseLRSDTransformPG)
+class ObjectTransformPG:
+    pass
+
+@addon.PropertyGroup(mixins=BaseTransformPG)
 class MeshTransformPG:
     pass
 
-@addon.PropertyGroup
+@addon.PropertyGroup(mixins=BaseTransformPG)
 class CurveTransformPG:
     pass
 
-@addon.PropertyGroup
+@addon.PropertyGroup(mixins=BaseTransformPG)
 class MetaTransformPG:
     pass
 
-@addon.PropertyGroup
+@addon.PropertyGroup(mixins=BaseTransformPG)
 class LatticeTransformPG:
     pass
 
-@addon.PropertyGroup
+@addon.PropertyGroup(mixins=BaseLRSTransformPG)
 class PoseTransformPG:
     pass
 
-@addon.PropertyGroup
+@addon.PropertyGroup(mixins=BaseTransformPG)
 class BoneTransformPG:
     pass
 
-@addon.PropertyGroup
+@addon.PropertyGroup(mixins=BaseTransformPG)
 class GreaseTransformPG:
     pass
 
-@addon.PropertyGroup
+@addon.PropertyGroup(mixins=BaseTransformPG)
 class CursorTransformPG:
     pass
 
@@ -1201,6 +2025,17 @@ class ContextTransformPG:
     # for SpaceView3D -> we have to maintain a separate mapping.
     is_v3d = False | prop()
     index = 0 | prop()
+    
+    def ui_context(self):
+        area = getattr(addon[self], "area", None)
+        if (not area) or (not area.regions): return None
+        space_data = area.spaces.active
+        if space_data.type != 'VIEW_3D': return None
+        region_data = space_data.region_3d
+        region = None
+        for _region in area.regions:
+            if _region.type == 'WINDOW': region = _region
+        return dict(area=area, space_data=space_data, region=region, region_data=region_data)
     
     # Summaries are stored here because they might be different for each 3D view
     summary_items = [
@@ -1272,8 +2107,10 @@ class ContextTransformPG:
         if mode.startswith('EDIT'):
             pass
         elif mode == 'POSE':
-            pass
-        else: # OBJECT and others
+            #pass
+            self.pose.apply(tfm_aggr, summaries)
+        #else: # OBJECT and others
+        elif mode == 'OBJECT':
             self.object.apply(tfm_aggr, summaries)
     
     def draw(self, layout):
@@ -1300,8 +2137,10 @@ class ContextTransformPG:
         if 'EDIT' in mode:
             pass
         elif mode == 'POSE':
-            pass
-        else: # OBJECT and others
+            #pass
+            self.pose.draw(layout, self.summaries)
+        #else: # OBJECT and others
+        elif mode == 'OBJECT':
             self.object.draw(layout, self.summaries)
 
 @addon.PropertyGroup

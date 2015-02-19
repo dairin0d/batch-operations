@@ -129,3 +129,33 @@ def matrix_decompose(m, res_size=None):
     
     t = (m.translation.to_3d() if size == 4 else Vector())
     if res_size == 4: return (x, y, z, t)
+
+# for compatibility with 2.70
+def matrix_invert_safe(m):
+    try:
+        m.invert()
+        return
+    except ValueError:
+        pass
+    m.col[0][0] += 1e-6
+    m.col[1][1] += 1e-6
+    m.col[2][2] += 1e-6
+    m.col[3][3] += 1e-6
+    try:
+        m.invert()
+    except ValueError:
+        pass
+def matrix_inverted_safe(m):
+    try:
+        return m.inverted()
+    except ValueError:
+        pass
+    m = Matrix()
+    m.col[0][0] += 1e-6
+    m.col[1][1] += 1e-6
+    m.col[2][2] += 1e-6
+    m.col[3][3] += 1e-6
+    try:
+        return m.inverted()
+    except ValueError:
+        return Matrix()

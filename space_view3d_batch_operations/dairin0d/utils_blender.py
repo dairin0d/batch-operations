@@ -300,11 +300,12 @@ class MeshCache:
 # =============================== SELECTION ================================ #
 #============================================================================#
 class Selection:
-    def __init__(self, context=None, mode=None, elem_types=None, container=set, brute_force_update=False):
+    def __init__(self, context=None, mode=None, elem_types=None, container=set, brute_force_update=False, pose_bones=True):
         self.context = context
         self.mode = mode
         self.elem_types = elem_types
         self.brute_force_update = brute_force_update
+        self.pose_bones = pose_bones
         # In some cases, user might want a hashable type (e.g. frozenset or tuple)
         self.container = container
         # We MUST keep reference to bmesh, or it will be garbage-collected
@@ -525,10 +526,21 @@ class Selection:
         elif mode == 'POSE':
             total = len(active_obj.data.bones)
             item = active_obj.data.bones.active
-            yield ([], item, total)
             
-            for item in active_obj.data.bones:
-                yield (item, sel_map[item.select])
+            if self.pose_bones:
+                pose_bones = active_obj.pose.bones
+                
+                pb = (pose_bones.get(item.name) if item else None)
+                yield ([], pb, total)
+                
+                for item in active_obj.data.bones:
+                    pb = (pose_bones.get(item.name) if item else None)
+                    yield (pb, sel_map[item.select])
+            else:
+                yield ([], item, total)
+                
+                for item in active_obj.data.bones:
+                    yield (item, sel_map[item.select])
         elif mode == 'PARTICLE':
             # Theoretically, particle keys can be selected,
             # but there seems to be no API for working with this
@@ -559,6 +571,7 @@ class Selection:
         elif mode == 'EDIT_ARMATURE':
             active_obj.data.edit_bones.active = item
         elif mode == 'POSE':
+            if item: item = active_obj.data.bones.get(item.name)
             active_obj.data.bones.active = item
         elif mode == 'PARTICLE':
             # Theoretically, particle keys can be selected,
@@ -590,8 +603,7 @@ class Selection:
         # We use select_all(action) only when the context is right
         # and iterating over all objects can be avoided.
         select_all_action = None
-        if not is_actual_mode:
-            return select_all_action, data
+        if not is_actual_mode: return select_all_action, data
         
         operation, new_toggled, invert_new, old_toggled, invert_old = expr_info
         
@@ -707,14 +719,22 @@ class Selection:
         lines = []
         for i, build_info in enumerate(build_infos):
             use_kv = build_info.get("use_kv", False)
+            item_map = build_info.get("item_map", None)
             type_names = build_info["names"]
+            
+            expr_tab = tab*2
+            
+            if item_map: lines.append(tab + "item_map = {}".format(item_map))
             
             if use_kv:
                 lines.append(tab + "for item, value in args[{}].items():".format(i))
-                lines.append((tab*2) + "if not item: continue")
+                lines.append(expr_tab + "if not item: continue")
             else:
                 lines.append(tab + "for item in args[{}]:".format(i))
-            expr_tab = tab*2
+            
+            if item_map:
+                lines.append(expr_tab + "item = item_map.get(item.name)")
+                lines.append(expr_tab + "if not item: continue")
             
             if len(type_names) < 2:
                 item_type, names = type_names[0]
@@ -742,7 +762,7 @@ class Selection:
                     for name in names:
                         lines.append(expr_tab + expr_maker(name, use_kv, expr_info))
         
-        code = "def apply(*args, data=None):\n{}".format("\n".join(lines))
+        code = "def apply(*args, data=None, context=None):\n{}".format("\n".join(lines))
         #print(code.strip())
         
         exec(code, localvars, localvars)
@@ -866,11 +886,11 @@ class Selection:
                 bpy.ops.pose.select_all(action=select_all_action)
             
             if use_brute_force:
-                selector = make_selector({"names":[(None, ["select"])]})
-                selector(active_obj.data.bones, data=data)
+                selector = make_selector({"names":[(None, ["select"])], "item_map":"context.data.bones"})
+                selector(active_obj.data.bones, data=data, context=active_obj)
             else:
-                selector = make_selector({"names":[(None, ["select"])], "use_kv":True})
-                selector(data)
+                selector = make_selector({"names":[(None, ["select"])], "item_map":"context.data.bones", "use_kv":True})
+                selector(data, context=active_obj)
         elif mode == 'PARTICLE':
             if select_all_action:
                 bpy.ops.particle.select_all(action=select_all_action)
@@ -944,8 +964,8 @@ def IndividuallyActiveSelected(objects, context=None):
     prev_selection.restore()
 
 class ResumableSelection:
-    def __init__(self):
-        self.selection = Selection(container=frozenset)
+    def __init__(self, *args, **kwargs):
+        self.selection = Selection(*args, **kwargs)
         self.selection_walker = None
         self.selection_initialized = False
         
@@ -957,27 +977,39 @@ class ResumableSelection:
         self.screen_hash = 0
         self.scene_hash = 0
         self.undo_hash = 0
+        self.operators_len = 0
     
     def __call__(self, duration=0):
         if duration is None: duration = float("inf")
         context = bpy.context
+        wm = context.window_manager
+        active_obj = context.object
         mode = context.mode
-        obj_hash = (context.object.as_pointer() if context.object else 0)
+        obj_hash = (active_obj.as_pointer() if active_obj else 0)
         screen_hash = context.screen.as_pointer()
         scene_hash = context.scene.as_pointer()
         undo_hash = bpy.data.as_pointer()
+        operators_len = len(wm.operators)
+        
+        object_updated = False
+        if active_obj and ('EDIT' in active_obj.mode):
+            object_updated |= (active_obj.is_updated or active_obj.is_updated_data)
+            data = active_obj.data
+            if data: object_updated |= (data.is_updated or data.is_updated_data)
         
         reset = (self.mode != mode)
         reset |= (self.obj_hash != obj_hash)
         reset |= (self.screen_hash != screen_hash)
         reset |= (self.scene_hash != scene_hash)
         reset |= (self.undo_hash != undo_hash)
+        reset |= (self.operators_len != operators_len)
         if reset:
             self.mode = mode
             self.obj_hash = obj_hash
             self.screen_hash = screen_hash
             self.scene_hash = scene_hash
             self.undo_hash = undo_hash
+            self.operators_len = operators_len
             
             self.selection.bmesh = None
             self.selection_walker = None
@@ -986,22 +1018,26 @@ class ResumableSelection:
         time_stop = clock() + duration
         
         if self.selection_walker is None:
+            self.selection.bmesh = None
             self.selection_walker = self.selection.walk()
             self.selection_initialized = False
             yield (-2, None) # RESET
             if clock() > time_stop: return
         
         if not self.selection_initialized:
-            history, active, total = next(self.selection_walker, None)
-            if mode == 'EDIT_MESH': active = (history[-1] if history else None)
-            self.selection_initialized = True
-            yield (0, active) # ACTIVE
-            if clock() > time_stop: return
+            item = next(self.selection_walker, None)
+            if item: # can be None if active mode does not support selections
+                history, active, total = item
+                if mode == 'EDIT_MESH': active = (history[-1] if history else None)
+                self.selection_initialized = True
+                yield (0, active) # ACTIVE
+                if clock() > time_stop: return
         
         for item in self.selection_walker:
             if item[1]: yield (1, item[0]) # SELECTED
             if clock() > time_stop: break
         else: # the iterator is exhausted
+            self.selection.bmesh = None
             self.selection_walker = None
             yield (-1, None) # FINISHED
     
@@ -1189,6 +1225,7 @@ class ChangeMonitor:
             self.selection_changed = True
         
         if self.selection_walker is None:
+            self.selection.bmesh = None
             self.selection_walker = self.selection.walk()
         
         clock = time.clock()
@@ -1226,6 +1263,7 @@ class ChangeMonitor:
                     self.selection_changed = True
                     self.reset_selection()
                     return
+                self.selection.bmesh = None
                 self.selection_walker = None
                 self.selection_record_id = 0
         else:
@@ -1244,6 +1282,7 @@ class ChangeMonitor:
                     self.selection_recorder.append(item)
                 if clock() > time_stop: break
             else: # the iterator is exhausted
+                self.selection.bmesh = None
                 self.selection_walker = None
                 self.selection_recorded = True
                 self.selection_record_id = 0

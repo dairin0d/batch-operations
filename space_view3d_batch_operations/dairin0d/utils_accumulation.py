@@ -23,7 +23,6 @@ import bisect
 
 from .utils_python import sequence_startswith, sequence_endswith
 from .utils_text import indent, longest_common_substring
-from .bpy_inspect import prop
 
 #============================================================================#
 
@@ -189,7 +188,7 @@ class Aggregator:
     
     _compiled = {}
     
-    def __init__(self, type, queries=None, convert=None):
+    def __init__(self, type, queries=None, convert=None, epsilon=1e-6):
         self._type = type
         
         self._startswith = sequence_startswith
@@ -207,7 +206,9 @@ class Aggregator:
         elif isinstance(queries, str):
             queries = queries.split(" ")
         
-        compiled_key0 = (type, frozenset(queries), convert)
+        if (type != 'NUMBER') or ((epsilon is not None) and (epsilon <= 0)): epsilon = None
+        
+        compiled_key0 = (type, frozenset(queries), convert, epsilon)
         compiled = Aggregator._compiled.get(compiled_key0)
         
         if not compiled:
@@ -228,11 +229,11 @@ class Aggregator:
             if queries.intersection(('subseq', 'subseq_starts', 'subseq_ends')):
                 queries.update(('subseq', 'subseq_starts', 'subseq_ends'))
             
-            compiled_key = (type, frozenset(queries), convert)
+            compiled_key = (type, frozenset(queries), convert, epsilon)
             compiled = Aggregator._compiled.get(compiled_key)
             
             if not compiled:
-                compiled = self._compile(type, queries, convert)
+                compiled = self._compile(type, queries, convert, epsilon)
                 Aggregator._compiled[compiled_key] = compiled
             
             Aggregator._compiled[compiled_key0] = compiled
@@ -246,7 +247,7 @@ class Aggregator:
         
         self.reset()
     
-    def _compile(self, type, queries, convert):
+    def _compile(self, type, queries, convert, epsilon):
         reset_lines = []
         init_lines = []
         add_lines = []
@@ -261,7 +262,10 @@ class Aggregator:
         if 'same' in queries:
             reset_lines.append("self._same = True")
             init_lines.append("self._same = True")
-            add_lines.append("if self._same: self._same = (value == self._prev)")
+            if epsilon:
+                add_lines.append("if self._same: self._same = (abs(value - self._prev) <= %s)" % epsilon)
+            else:
+                add_lines.append("if self._same: self._same = (value == self._prev)")
         if 'prev' in queries:
             reset_lines.append("self._prev = None")
             init_lines.append("self._prev = value")
@@ -469,51 +473,3 @@ class VectorAggregator:
     subseq = property(lambda self: tuple(axis.subseq for axis in self.axes))
     subseq_starts = property(lambda self: tuple(axis.subseq_starts for axis in self.axes))
     subseq_ends = property(lambda self: tuple(axis.subseq_ends for axis in self.axes))
-
-class aggregated(prop):
-    def aggregate_make(self, value):
-        prop_decl = self.make(value)
-        
-        aggregation_type = 'NUMBER'
-        vector_size = 0
-        convert = None
-        
-        prop_info = BpyProp(prop_decl)
-        if prop_info.type in (bpy.props.BoolProperty, bpy.props.IntProperty, bpy.props.FloatProperty):
-            if prop_info.type is bpy.props.BoolProperty: convert = int
-        elif prop_info.type in (bpy.props.BoolVectorProperty, bpy.props.IntVectorProperty, bpy.props.FloatVectorProperty):
-            if prop_info.type is bpy.props.BoolVectorProperty: convert = int
-            vector_size = prop_info.get("size") or len(prop_info["default"])
-        elif prop_info.type is bpy.props.CollectionProperty:
-            aggregation_type = 'SEQUENCE'
-        elif prop_info.type is bpy.props.EnumProperty:
-            aggregation_type = 'ENUM'
-        elif prop_info.type is bpy.props.StringProperty:
-            aggregation_type = 'STRING'
-        elif prop_info.type is bpy.props.PointerProperty:
-            aggregation_type = 'OBJECT'
-        
-        default_queries = prop_info.get("queries")
-        
-        if vector_size == 0:
-            @staticmethod
-            def aggregator(queries=None):
-                if queries is None: queries = default_queries
-                return Aggregator(aggregation_type, queries, convert)
-        else:
-            @staticmethod
-            def aggregator(queries=None):
-                if queries is None: queries = default_queries
-                return VectorAggregator(vector_size, aggregation_type, queries, convert)
-        
-        class AggregatePG:
-            value = prop_decl
-            same = True | prop()
-            aggregator = aggregator
-        AggregatePG.__name__ += ":AUTOREGISTER" # for AddonManager
-        
-        return AggregatePG | prop()
-    
-    __ror__ = aggregate_make
-    __rlshift__ = aggregate_make
-    __rrshift__ = aggregate_make

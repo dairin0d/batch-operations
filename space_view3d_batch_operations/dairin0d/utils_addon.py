@@ -34,8 +34,15 @@ from .utils_ui import messagebox, NestedLayout, ui_context_under_coord
 from .utils_userinput import KeyMapUtils
 from .bpy_inspect import BpyProp, prop, BlEnums
 from .utils_blender import ResumableSelection
+from .utils_view3d import ZBufferRecorder
 
 #============================================================================#
+
+# Some tips for [regression] testing:
+# * Enable -> disable -> enable
+# * Enabled by default, disabled by default
+# * Default scene, scene saved without addon, scene saved with addon
+# * Stable Blender, nightly build, GSOC/open-project branch
 
 # TODO: "load/save/import/export config" buttons in addon preferences (draw() method)
 
@@ -70,6 +77,10 @@ class AddonManager:
         self.attributes = {}
         self.attributes_by_pointer = {}
         self.delayed_type_extensions = []
+        
+        self._preferences = None
+        
+        self._use_zbuffer = False
         
         self._on_register = []
         self._on_unregister = []
@@ -185,11 +196,7 @@ class AddonManager:
     
     @property
     def preferences(self):
-        userprefs = bpy.context.user_preferences
-        try:
-            return userprefs.addons[self.module_name].preferences
-        except KeyError:
-            return None
+        return self._preferences
     
     @classmethod
     def external_attr(cls, name):
@@ -359,6 +366,14 @@ class AddonManager:
     #========================================================================#
     
     # ===== HANDLERS AND TYPE EXTENSIONS ===== #
+    @property
+    def use_zbuffer(self):
+        return self._use_zbuffer
+    @use_zbuffer.setter
+    def use_zbuffer(self, value):
+        if self.status != 'INITIALIZATION': return
+        self._use_zbuffer = value
+    
     def on_register(self, callback):
         self._on_register.append(callback)
         return callback
@@ -620,9 +635,13 @@ class AddonManager:
         if BpyProp.is_in(self.Internal):
             self.type_extend("Screen", self.storage_name_internal, self.Internal)
         
+        # Don't clear delayed_type_extensions! We need it if addon is disabled->enabled again.
         for delayed_type_extension in self.delayed_type_extensions:
             self.type_extend(*delayed_type_extension)
-        self.delayed_type_extensions.clear()
+        
+        userprefs = bpy.context.user_preferences
+        if self.module_name in userprefs.addons:
+            self._preferences = userprefs.addons[self.module_name].preferences
         
         if load_config:
             self.external_load()
@@ -632,10 +651,16 @@ class AddonManager:
         
         addons_registry.add(self)
         
+        if self.use_zbuffer:
+            ZBufferRecorder.users += 1
+        
         self.status = 'REGISTERED'
     
     def unregister(self):
         self.status = 'UNREGISTRATION'
+        
+        if self.use_zbuffer:
+            ZBufferRecorder.users -= 1
         
         addons_registry.remove(self)
         
@@ -644,6 +669,8 @@ class AddonManager:
         
         self.attributes.clear()
         self.attributes_by_pointer.clear()
+        
+        self._preferences = None
         
         self.remove_all()
         
@@ -747,14 +774,21 @@ class AddonManager:
         # ADD METADATA TO PROPERTY
         prop_info["op_invoke_menu"] = op_idname
     
-    def _add_class(self, cls):
+    def _add_class(self, cls, mixins=None):
+        if mixins:
+            if isinstance(mixins, type): mixins = (mixins,)
+            for mixin in mixins:
+                for attr_name in dir(mixin):
+                    if hasattr(cls, attr_name): continue
+                    setattr(cls, attr_name, getattr(mixin, attr_name))
+        
         # Register property-specific classes
         for key, info in BpyProp.iterate(cls):
             if info.type == bpy.props.EnumProperty:
-                if "on_item_invoke" in info:
+                if "on_item_invoke" in info: # Deprecated? Use get/set instead?
                     self._wrap_enum_on_item_invoke(info)
                 
-                if "contextual_title" in info:
+                if "contextual_title" in info: # Deprecated? How was it supposed to be used, anyway?
                     if issubclass(cls, bpy.types.Operator):
                         self._wrap_enum_contextual_title(info, cls, key)
         
@@ -1169,17 +1203,17 @@ def {0}({1}):
     #========================================================================#
     
     # ===== PROPERTY GROUP DECORATORS ===== #
-    def _gen_pg(self, cls):
+    def _gen_pg(self, cls, mixins=None):
         cls = ensure_baseclass(cls, bpy.types.PropertyGroup)
         addons_registry.UUID_add(cls)
-        self._add_class(cls)
+        self._add_class(cls, mixins=mixins)
         return cls
     
     def PropertyGroup(self, cls=None, **kwargs):
         if cls: return self._gen_pg(cls, **kwargs)
         return (lambda cls: self._gen_pg(cls, **kwargs))
     
-    def _gen_idblock(self, cls, name=None, icon='DOT', sorted=False, show_empty=True):
+    def _gen_idblock(self, cls, name=None, icon='DOT', sorted=False, show_empty=True, mixins=None):
         name = name or bpy.path.display_name(cls.__name__)
         
         # ===== Item ===== #
@@ -1192,7 +1226,7 @@ def {0}({1}):
             if hasattr(selfx, "_idblocks"): selfx._idblocks._on_rename(self)
         cls.name = "" | prop(update=update_name)
         
-        self._add_class(cls)
+        self._add_class(cls, mixins=mixins)
         # ================ #
         
         # ===== Collection ===== #
@@ -1896,11 +1930,24 @@ if not hasattr(bpy.types, "BACKGROUND_OT_ui_monitor"):
         mouse_prev = (0, 0)
         mouse_region = (0, 0)
         mouse_context = None # can be None between areas, for example
+        last_mouse_context = None
+        last_rv3d_context = None
         
         alt = False
         ctrl = False
         shift = False
         oskey = False
+        
+        @classmethod
+        def _assign_last_context(cls, name, curr_context):
+            if curr_context:
+                setattr(cls, name, curr_context)
+            else:
+                last_context = getattr(cls, name)
+                if last_context:
+                    area = last_context.get("area")
+                    if (not area) or (not area.regions):
+                        setattr(cls, name, None)
         
         @classmethod
         def activate(cls):
@@ -1952,6 +1999,12 @@ if not hasattr(bpy.types, "BACKGROUND_OT_ui_monitor"):
                 cls.mouse_prev = (event.mouse_prev_x, event.mouse_prev_y)
                 cls.mouse_region = (event.mouse_region_x, event.mouse_region_y)
                 cls.mouse_context = ui_context_under_coord(event.mouse_x, event.mouse_y)
+                
+                cls._assign_last_context("last_mouse_context", cls.mouse_context)
+                if cls.mouse_context and cls.mouse_context.get("region_data"):
+                    cls._assign_last_context("last_rv3d_context", cls.mouse_context)
+                else:
+                    cls._assign_last_context("last_rv3d_context", None)
             
             for addon in addons_registry.ui_monitor:
                 for callback in addon._ui_monitor:
@@ -2176,7 +2229,10 @@ class AddonsRegistry:
             self._UUID_key = "\x02{UUID:%s}\x03" % time.time()
         
         for addon in self.addons.values():
-            addon.attributes = {} # clear storages left from the previous session
+            # clear storages left from the previous session
+            addon.attributes.clear()
+            addon.attributes_by_pointer.clear()
+            
             for callback in addon._load_post:
                 try:
                     callback()

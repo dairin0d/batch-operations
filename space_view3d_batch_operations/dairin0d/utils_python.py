@@ -46,8 +46,7 @@ def send_catch(iterator, arg):
 
 def ensure_baseclass(cls, base):
     for _base in cls.__bases__:
-        if issubclass(_base, base):
-            return cls
+        if issubclass(_base, base): return cls
     
     # A declaration like SomeClass(object, object_descendant)
     # will result in an error (cannot create a consistent
