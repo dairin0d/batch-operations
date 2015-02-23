@@ -17,17 +17,24 @@
 
 import traceback
 
-def setattr_cmp(obj, name, value):
-    "Utility function to avoid triggering updates when nothing changed"
-    if getattr(obj, name) == value: return
-    setattr(obj, name, value)
+def compare_epsilon(a, b, epsilon):
+    if (epsilon is None) or (not isinstance(a, (int, float))): return (a == b)
+    return abs(a - b) <= epsilon
 
-def setitem_cmp(obj, key, value):
+def setattr_cmp(obj, name, value, epsilon=None):
+    "Utility function to avoid triggering updates when nothing changed"
+    if compare_epsilon(getattr(obj, name), value, epsilon): return False
+    setattr(obj, name, value)
+    return True
+
+def setitem_cmp(obj, key, value, epsilon=None):
     "Utility function to avoid triggering updates when nothing changed"
     try:
-        if obj[name] != value: obj[name] = value
+        if compare_epsilon(obj[name], value, epsilon): return False
     except KeyError:
-        obj[name] = value
+        pass
+    obj[name] = value
+    return True
 
 def reverse_enumerate(l):
     return zip(range(len(l)-1, -1, -1), reversed(l))

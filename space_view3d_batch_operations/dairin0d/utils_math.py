@@ -85,7 +85,7 @@ def to_matrix4x4(orient, pos):
 def matrix_compose(*args):
     size = len(args)
     m = Matrix.Identity(size)
-    axes = m.col # m.row
+    axes = m.col
     
     if size == 2:
         for i in (0, 1):

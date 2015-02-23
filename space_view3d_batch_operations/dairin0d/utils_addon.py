@@ -1793,6 +1793,7 @@ class IDBlockSelector:
         except IndexError: #KeyError:
             pass
     
+    @property
     def object(self):
         selfx = self._addon[self] # "self extended"
         
@@ -1925,6 +1926,7 @@ if not hasattr(bpy.types, "BACKGROUND_OT_ui_monitor"):
         _script_reload_kmis = []
         
         event_count = 0
+        user_interaction = False
         
         mouse = (0, 0)
         mouse_prev = (0, 0)
@@ -1951,9 +1953,10 @@ if not hasattr(bpy.types, "BACKGROUND_OT_ui_monitor"):
         
         @classmethod
         def activate(cls):
-            if cls._is_running or (not addons_registry.ui_monitor): return
-            cls._is_running = True
-            bpy.ops.background.ui_monitor('INVOKE_DEFAULT')
+            if cls._is_running: return
+            if addons_registry.ui_monitor or cls.user_interaction:
+                cls._is_running = True
+                bpy.ops.background.ui_monitor('INVOKE_DEFAULT')
         
         def invoke(self, context, event):
             cls = self.__class__
@@ -1976,6 +1979,7 @@ if not hasattr(bpy.types, "BACKGROUND_OT_ui_monitor"):
             cls = self.__class__
             
             cls.event_count += 1
+            cls.user_interaction = False
             
             #print((event.type, event.value, event.shift, event.alt, event.ctrl))
             
