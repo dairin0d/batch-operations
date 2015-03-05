@@ -546,19 +546,6 @@ class SmartView3D:
         return (Vector((sx, sy, persp)), Vector((dx, dy, dz)))
     proj_params = property(__get)
     
-    """
-    def view_frame(self, scene=None, local=True):
-        if self.is_camera and (self.camera.type == 'CAMERA'):
-            points = self.camera.data.view_frame(scene)
-        else:
-            region = self.region
-            rv3d = self.region_data
-            w, h = region.width, region.height
-            refpos = 
-            region_2d_to_location_3d(region, rv3d, Vector((w, h)), Vector(pos)).to_3d()
-            return self.region_data.is_perspective
-    """
-    
     def region_rect(self, overlap=True):
         return calc_region_rect(self.area, self.region, overlap)
     
