@@ -264,6 +264,11 @@ class BlRna:
             return None
     
     @staticmethod
+    def parent(obj, n=-1, coerce=True):
+        path_parts = obj.path_from_id().split(".")
+        return obj.id_data.path_resolve(".".join(path_parts[:n]), coerce)
+    
+    @staticmethod
     def to_bpy_prop(obj, name=None):
         rna_prop = (obj if name is None else BlRna(obj).properties[name])
         
@@ -1082,12 +1087,13 @@ class prop:
         elif vtype in self.types_float_vector_subtype: # a = Vector() | prop()
             bpy_type = bpy.props.FloatVectorProperty
             if vtype is Matrix: value = itertools.chain(*value)
-            value = tuple(value)
-            kwargs["size"] = len(value)
             if "subtype" not in kwargs: kwargs["subtype"] = self.types_float_vector_subtype[vtype]
             if kwargs["subtype"] == 'COLOR': # need to set min-max to 0..1, otherwise glitches
                 kwargs.setdefault("min", 0.0)
                 kwargs.setdefault("max", 1.0)
+                if "alpha" in kwargs: value = (value[0], value[1], value[2], kwargs.pop("alpha"))
+            value = tuple(value)
+            kwargs["size"] = len(value)
         elif isinstance(value, tuple) and value: # a = (False, False, False) | prop()
             itype = type(value[0])
             if itype in self.types_primitive_vector:

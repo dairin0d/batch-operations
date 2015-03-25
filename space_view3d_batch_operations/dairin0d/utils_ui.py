@@ -21,87 +21,8 @@ import blf
 
 from mathutils import Color, Vector, Matrix, Quaternion, Euler
 
-#============================================================================#
+from .utils_gl import cgl
 
-# ===== SPLIT TEXT TO LINES ===== #
-def split_word(width, x, max_x, word, lines, fontid=0):
-    line = ""
-    
-    for c in word:
-        x_dx = x + blf.dimensions(fontid, line+c)[0]
-        
-        if (x_dx) > width:
-            x_dx = blf.dimensions(fontid, line)[0]
-            lines.append(line)
-            line = c
-            x = 0
-        else:
-            line += c
-        
-        max_x = max(x_dx, max_x)
-    
-    return line, x, max_x
-
-def split_line(width, x, max_x, line, lines, fontid=0):
-    words = line.split(" ")
-    line = ""
-    
-    for word in words:
-        c = (word if not line else " " + word)
-        x_dx = x + blf.dimensions(fontid, line+c)[0]
-        
-        if (x_dx) > width:
-            x_dx = blf.dimensions(fontid, line)[0]
-            if not line:
-                # one word is longer than the width
-                line, x, max_x = split_word(
-                    width, x, max_x, word, lines, fontid)
-            else:
-                lines.append(line)
-                line = word
-            x = 0
-        else:
-            line += c
-        
-        max_x = max(x_dx, max_x)
-    
-    if line:
-        lines.append(line)
-    
-    return max_x
-
-def split_text(width, x, max_x, text, lines, fontid=0):
-    for line in text.splitlines():
-        if not line:
-            lines.append("")
-        else:
-            max_x = split_line(width, x, max_x, line, lines, fontid)
-        x = 0
-    
-    return max_x
-
-def wrap_text(text, width, fontid=0, indent=0):
-    """
-    Splits text into lines that don't exceed the given width.
-    text -- the text.
-    width -- the width the text should fit into.
-    fontid -- the id of the typeface as returned by blf.load().
-        Defaults to 0 (the default font).
-    indent -- the indent of the paragraphs.
-        Defaults to 0.
-    Returns: lines, actual_width
-    lines -- the list of the resulting lines
-    actual_width -- the max width of these lines
-        (may be less than the supplied width).
-    """
-    lines = []
-    max_x = 0
-    for line in text.splitlines():
-        if not line:
-            lines.append("")
-        else:
-            max_x = split_line(width, indent, max_x, line, lines, fontid)
-    return lines, max_x
 #============================================================================#
 
 # Note: making a similar wrapper for Operator.report is impossible,
@@ -140,7 +61,7 @@ if not hasattr(bpy.types, "INFO_OT_messagebox"):
             width = self.args.get("width", 300) - border_w
             
             self.lines = []
-            max_x = split_text(width, icon_w, 0, text, self.lines)
+            max_x = cgl.text.split_text(width, icon_w, 0, text, self.lines, font=0)
             width = max_x + border_w
             
             self.spacing = self.args.get("spacing", 0.5)
@@ -163,6 +84,7 @@ if not hasattr(bpy.types, "INFO_OT_messagebox"):
             
             icon = self.icon
             for line in self.lines:
+                if icon != 'NONE': line = " "+line
                 col.label(text=line, icon=icon)
                 icon = 'NONE'
     
@@ -420,6 +342,8 @@ class NestedLayout:
 
 #============================================================================#
 
+# TODO: put all these into BlUI class?
+
 def tag_redraw(arg=None):
     """A utility function to tag redraw of arbitrary UI units."""
     if arg is None:
@@ -453,12 +377,10 @@ def calc_region_rect(area, r, overlap=True):
         return (Vector((r.x, r.y)), Vector((r.width, r.height)))
 
 def point_in_rect(p, r):
-    return ((p[0] >= r.x) and (p[0] < r.x + r.width)
-            and (p[1] >= r.y) and (p[1] < r.y + r.height))
+    return ((p[0] >= r.x) and (p[0] < r.x + r.width) and (p[1] >= r.y) and (p[1] < r.y + r.height))
 
 def rv3d_from_region(area, region):
-    if (area.type != 'VIEW_3D') or (region.type != 'WINDOW'):
-        return None
+    if (area.type != 'VIEW_3D') or (region.type != 'WINDOW'): return None
     
     space_data = area.spaces.active
     try:
@@ -466,17 +388,14 @@ def rv3d_from_region(area, region):
     except AttributeError:
         quadviews = None # old API
     
-    if not quadviews:
-        return space_data.region_3d
+    if not quadviews: return space_data.region_3d
     
     x_id = 0
     y_id = 0
     for r in area.regions:
         if (r.type == 'WINDOW') and (r != region):
-            if r.x < region.x:
-                x_id = 1
-            if r.y < region.y:
-                y_id = 1
+            if r.x < region.x: x_id = 1
+            if r.y < region.y: y_id = 1
     
     # 0: bottom left (Front Ortho)
     # 1: top left (Top Ortho)
@@ -485,10 +404,12 @@ def rv3d_from_region(area, region):
     return quadviews[y_id | (x_id << 1)]
 
 # areas can't overlap, but regions can
-def ui_contexts_under_coord(x, y):
+def ui_contexts_under_coord(x, y, window=None):
     point = int(x), int(y)
-    window = bpy.context.window
+    if not window: window = bpy.context.window
     screen = window.screen
+    scene = screen.scene
+    tool_settings = scene.tool_settings
     for area in screen.areas:
         if point_in_rect(point, area):
             space_data = area.spaces.active
@@ -496,19 +417,21 @@ def ui_contexts_under_coord(x, y):
                 if point_in_rect(point, region):
                     yield dict(window=window, screen=screen,
                         area=area, space_data=space_data, region=region,
-                        region_data=rv3d_from_region(area, region))
+                        region_data=rv3d_from_region(area, region),
+                        scene=scene, tool_settings=tool_settings)
             break
 
-def ui_context_under_coord(x, y, index=0):
+def ui_context_under_coord(x, y, index=0, window=None):
     ui_context = None
-    for i, ui_context in enumerate(ui_contexts_under_coord(x, y)):
-        if i == index:
-            return ui_context
+    for i, ui_context in enumerate(ui_contexts_under_coord(x, y, window)):
+        if i == index: return ui_context
     return ui_context
 
-def find_ui_area(area_type, region_type='WINDOW'):
-    window = bpy.context.window
+def find_ui_area(area_type, region_type='WINDOW', window=None):
+    if not window: window = bpy.context.window
     screen = window.screen
+    scene = screen.scene
+    tool_settings = scene.tool_settings
     for area in screen.areas:
         if area.type == area_type:
             space_data = area.spaces.active
@@ -517,10 +440,26 @@ def find_ui_area(area_type, region_type='WINDOW'):
                 if _region.type == region_type: region = _region
             return dict(window=window, screen=screen,
                 area=area, space_data=space_data, region=region,
-                region_data=rv3d_from_region(area, region))
+                region_data=rv3d_from_region(area, region),
+                scene=scene, tool_settings=tool_settings)
+
+def ui_hierarchy(ui_obj):
+    if isinstance(ui_obj, bpy.types.Window):
+        return (ui_obj, None, None)
+    elif isinstance(ui_obj, bpy.types.Area):
+        wm = bpy.context.window_manager
+        for window in wm.windows:
+            for area in window.screen.areas:
+                if area == ui_obj: return (window, area, None)
+    elif isinstance(ui_obj, bpy.types.Region):
+        wm = bpy.context.window_manager
+        for window in wm.windows:
+            for area in window.screen.areas:
+                for region in area.regions:
+                    if region == ui_obj: return (window, area, region)
 
 # TODO: relative coords?
-def convert_ui_coord(window, area, region, xy, src, dst, vector=True):
+def convert_ui_coord(area, region, xy, src, dst, vector=True):
     x, y = xy
     if src == dst:
         pass
