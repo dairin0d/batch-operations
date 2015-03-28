@@ -18,6 +18,7 @@
 from mathutils import Color, Vector, Matrix, Quaternion, Euler
 
 import math
+import itertools
 
 # Newton's binomial coefficients / Pascal's triangle coefficients / n choose k / nCk
 # https://stackoverflow.com/questions/26560726/python-binomial-coefficient
@@ -140,6 +141,28 @@ def orthogonal_XYZ(x, y, z, main_axis=None, ort_XY=True):
 
 def orthogonal_in_XY(v):
     return (Vector((0,0,1)).cross(v) if (1.0 - abs(v.z)) > 1e-6 else Vector((1,0,0)))
+
+def matrix_flatten(m):
+    return tuple(itertools.chain(*m.col))
+
+def matrix_unflatten(array):
+    size = len(array)
+    if size == 16:
+        m = Matrix.Identity(4)
+        m.col[0] = array[0:4]
+        m.col[1] = array[4:8]
+        m.col[2] = array[8:12]
+        m.col[3] = array[12:16]
+    elif size == 9:
+        m = Matrix.Identity(3)
+        m.col[0] = array[0:3]
+        m.col[1] = array[3:6]
+        m.col[2] = array[6:9]
+    elif size == 4:
+        m = Matrix.Identity(2)
+        m.col[0] = array[0:2]
+        m.col[1] = array[2:4]
+    return m
 
 def matrix_LRS(L, R, S):
     m = R.to_matrix()

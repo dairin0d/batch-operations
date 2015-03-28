@@ -245,7 +245,8 @@ class CGL:
     def CallList(self, id):
         pass
 
-cgl = CGL()
+# Quick & dirty hack to have same object throughout the script reloads
+if "cgl" not in locals(): cgl = CGL()
 
 def fill_BLF():
     options = {'CLIPPING':blf.CLIPPING, 'KERNING_DEFAULT':blf.KERNING_DEFAULT, 'ROTATION':blf.ROTATION, 'SHADOW':blf.SHADOW}

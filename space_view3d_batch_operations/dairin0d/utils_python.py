@@ -59,7 +59,7 @@ def bools_to_int(bools):
     # https://stackoverflow.com/questions/4065737/python-numpy-convert-list-of-bools-to-unsigned-int
     return sum((1 << i) for i, b in enumerate(bools) if b)
 
-def binary_search(seq, t, key=None, cmp=None):
+def binary_search(seq, t, key=None, cmp=None): # bisect module doesn't support key/compare callbacks
     # http://code.activestate.com/recipes/81188-binary-search/
     min = 0
     max = len(seq) - 1
@@ -163,6 +163,20 @@ class AttributeHolder:
             del self.__items[key]
         except AttributeError:
             raise KeyError(key)
+
+class DummyObject:
+    def __call__(self, *args, **kwargs):
+        return self
+    def __getattr__(self, name):
+        return self
+    def __setattr__(self, name, value):
+        pass
+    def __getitem__(self, key):
+        return self
+    def __setitem__(self, key, value):
+        pass
+    def __delitem__(self, key):
+        pass
 
 class SilentError:
     """

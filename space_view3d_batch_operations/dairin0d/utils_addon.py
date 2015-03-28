@@ -32,7 +32,7 @@ from .version import version
 from .utils_python import next_catch, send_catch, ensure_baseclass, issubclass_safe, PrimitiveLock, AttributeHolder, SilentError, attrs_to_dict, dict_to_attrs
 from .utils_text import compress_whitespace, indent, unindent
 from .utils_gl import cgl
-from .utils_ui import messagebox, NestedLayout, ui_context_under_coord
+from .utils_ui import messagebox, NestedLayout, ButtonRegistrator, ui_context_under_coord
 from .utils_userinput import KeyMapUtils
 from .bpy_inspect import BlEnums, BlRna, BpyProp, BpyOp, prop
 from .utils_blender import ResumableSelection
@@ -689,7 +689,7 @@ class AddonManager:
         
         addons_registry.add(self)
         
-        if self.use_zbuffer: ZBufferRecorder.users += 1
+        if self.use_zbuffer: addons_registry.zbuf_users += 1
         
         self.status = 'REGISTERED'
     
@@ -698,7 +698,7 @@ class AddonManager:
         
         self._preferences = None
         
-        if self.use_zbuffer: ZBufferRecorder.users -= 1
+        if self.use_zbuffer: addons_registry.zbuf_users -= 1
         
         addons_registry.remove(self)
         
@@ -2190,6 +2190,10 @@ class AddonsRegistry:
     job_interval = job_duration * 5
     job_next_update = 0.0
     
+    zbuf_users = 0
+    module_infos = {}
+    module_users = {}
+    
     def add(self, addon):
         addon_key = (addon.module_name, addon.path)
         if addon_key in self.addons: return
@@ -2200,6 +2204,10 @@ class AddonsRegistry:
         if addon._scene_update_post: self.scene_update_post.append(addon)
         if addon._background_job: self.background_job.append(addon)
         if addon._selection_job: self.selection_job.append(addon)
+        
+        for module_path in self.module_infos:
+            if module_path.startswith(addon.path):
+                self.module_users[module_path] = self.module_users.get(module_path, 0) + 1
     
     def remove(self, addon):
         addon_key = (addon.module_name, addon.path)
@@ -2210,6 +2218,10 @@ class AddonsRegistry:
         if addon._scene_update_post: self.scene_update_post.remove(addon)
         if addon._background_job: self.background_job.remove(addon)
         if addon._selection_job: self.selection_job.remove(addon)
+        
+        for module_path in self.module_infos:
+            if module_path.startswith(addon.path):
+                self.module_users[module_path] = self.module_users.get(module_path, 0) - 1
     
     def analyze_selection(self, duration=None):
         event = None # in case loop is skipped (no selected elements processed)
@@ -2223,7 +2235,7 @@ class AddonsRegistry:
                         traceback.print_exc()
         return event
     
-    def __new__(cls):
+    def __new__(cls, module_info):
         scene_update_pre = None
         for callback in bpy.app.handlers.scene_update_pre:
             if callback.__name__ == cls._scene_update_pre_key:
@@ -2245,6 +2257,8 @@ class AddonsRegistry:
             self._sel_iter = ResumableSelection()
             self.event_lock = PrimitiveLock()
             
+            self._button_registrator = ButtonRegistrator()
+            
             @bpy.app.handlers.persistent
             def load_pre(*args, **kwargs):
                 addons_registry.load_pre()
@@ -2254,15 +2268,26 @@ class AddonsRegistry:
             def load_post(*args, **kwargs):
                 addons_registry.load_post()
             bpy.app.handlers.load_post.append(load_post)
-            
-            self.post_view_handler = bpy.types.SpaceView3D.draw_handler_add(cls.post_view_callback, (), 'WINDOW', 'POST_VIEW')
-            self.post_pixel_handler = bpy.types.SpaceView3D.draw_handler_add(cls.post_pixel_callback, (), 'WINDOW', 'POST_PIXEL')
+        
+        self.module_infos[module_info["key"]] = module_info
+        
+        #cls = self.__class__ # make sure we deal with the currently used class
+        
+        # When scripts are reloaded, draw handlers are removed! So we must make sure they're added each time.
+        if self.post_view_handler: bpy.types.SpaceView3D.draw_handler_remove(self.post_view_handler, 'WINDOW')
+        self.post_view_handler = bpy.types.SpaceView3D.draw_handler_add(cls.post_view_callback, (), 'WINDOW', 'POST_VIEW')
+        if self.post_pixel_handler: bpy.types.SpaceView3D.draw_handler_remove(self.post_pixel_handler, 'WINDOW')
+        self.post_pixel_handler = bpy.types.SpaceView3D.draw_handler_add(cls.post_pixel_callback, (), 'WINDOW', 'POST_PIXEL')
         
         if scene_update_pre is None:
             @bpy.app.handlers.persistent
             def scene_update_pre(scene):
                 if self.event_lock: return # prevent infinite recursion
                 with self.event_lock:
+                    self.detect_undo(True)
+                    
+                    self._button_registrator.update()
+                    
                     for callback, addon in self.after_register:
                         if addon.status != 'REGISTERED': continue
                         try:
@@ -2290,6 +2315,8 @@ class AddonsRegistry:
             def scene_update_post(scene):
                 if self.event_lock: return # prevent infinite recursion
                 with self.event_lock:
+                    self.detect_undo(False)
+                    
                     # We need to invoke the monitor from somewhere other than
                     # keymap event, since keymap event can lock the operator
                     # to the Preferences window. Scene update, on the other
@@ -2332,6 +2359,15 @@ class AddonsRegistry:
         
         return self
     
+    undo_detected = False
+    _undo_hash = None
+    def detect_undo(self, reset):
+        if reset: self.undo_detected = False
+        undo_hash = bpy.data.as_pointer()
+        if self._undo_hash != undo_hash:
+            self._undo_hash = undo_hash
+            self.undo_detected = True
+    
     load_count = 0 # 0 is when Blender has just opened (with the default/startup file)
     
     def load_pre(self):
@@ -2367,19 +2403,50 @@ class AddonsRegistry:
                         print("Error in {} load_post {}:".format(addon.module_name, callback.__name__))
                         traceback.print_exc()
     
+    post_view_handler = None
     @staticmethod
     def post_view_callback():
-        cgl.Matrix_ModelView_2D = None
-        cgl.Matrix_Projection_2D = None
-        cgl.Matrix_ModelView_3D = cgl.Matrix_ModelView
-        cgl.Matrix_Projection_3D = cgl.Matrix_Projection
+        self = addons_registry
+        i = 0
+        for module_info in self.module_infos.values():
+            # if module path is not present among users, it means a shared library is used
+            if self.module_users.get(module_info["key"], 1) == 0: continue
+            cgl = module_info["cgl"]
+            
+            if i == 0:
+                Matrix_ModelView = cgl.Matrix_ModelView
+                Matrix_Projection = cgl.Matrix_Projection
+            cgl.Matrix_ModelView_2D = None
+            cgl.Matrix_Projection_2D = None
+            cgl.Matrix_ModelView_3D = Matrix_ModelView
+            cgl.Matrix_Projection_3D = Matrix_Projection
+            
+            i += 1
     
+    post_pixel_handler = None
     @staticmethod
     def post_pixel_callback():
-        cgl.Matrix_ModelView_2D = cgl.Matrix_ModelView
-        cgl.Matrix_Projection_2D = cgl.Matrix_Projection
-        
-        ZBufferRecorder.draw_pixel_callback()
+        self = addons_registry
+        i = 0
+        for module_info in self.module_infos.values():
+            # if module path is not present among users, it means a shared library is used
+            if self.module_users.get(module_info["key"], 1) == 0: continue
+            cgl = module_info["cgl"]
+            ZBufferRecorder = module_info["ZBufferRecorder"]
+            
+            if i == 0:
+                Matrix_ModelView = cgl.Matrix_ModelView
+                Matrix_Projection = cgl.Matrix_Projection
+            cgl.Matrix_ModelView_2D = Matrix_ModelView
+            cgl.Matrix_Projection_2D = Matrix_Projection
+            
+            if i == 0:
+                ZBufferRecorder.draw_pixel_callback(self.zbuf_users)
+                ZBufferRecorder0 = ZBufferRecorder
+            else:
+                ZBufferRecorder.copy(ZBufferRecorder0)
+            
+            i += 1
 
 UUID_container_PG = getattr(bpy.types, AddonsRegistry._UUID_container_PG_key, None)
 if UUID_container_PG is None:
@@ -2389,7 +2456,9 @@ if UUID_container_PG is None:
 if not hasattr(bpy.types.WindowManager, AddonsRegistry._UUID_counter_key):
     setattr(bpy.types.WindowManager, AddonsRegistry._UUID_counter_key, 0 | -prop())
 
-addons_registry = AddonsRegistry()
+addons_registry = AddonsRegistry(dict(key=__file__, cgl=cgl, ZBufferRecorder=ZBufferRecorder))
+
+NestedLayout._button_registrator = addons_registry._button_registrator
 
 # ===== FINISH SELECTION ANALYSIS ===== #
 class WM_OT_finish_selection_analysis(bpy.types.Operator):

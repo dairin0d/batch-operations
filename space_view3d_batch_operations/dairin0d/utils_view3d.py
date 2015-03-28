@@ -984,15 +984,13 @@ class ZBufferRecorder:
     buffers = {}
     queue = []
     
-    users = 0
-    
     @staticmethod
-    def draw_pixel_callback():
+    def draw_pixel_callback(users):
         context = bpy.context # we need most up-to-date context
         area = context.area
         region = context.region
         
-        if ZBufferRecorder.users > 0:
+        if users > 0:
             xy = (region.x, region.y)
             wh = (region.width, region.height)
             zbuf = cgl.read_zbuffer(xy, wh)
@@ -1009,6 +1007,11 @@ class ZBufferRecorder:
             queue = queue[index+1:]
             ZBufferRecorder.queue = queue
         
-        if ZBufferRecorder.users > 0:
+        if users > 0:
             buffers[region] = zbuf
             queue.append(region)
+    
+    @classmethod
+    def copy(cls, other):
+        cls.buffers = other.buffers
+        cls.queue = other.queue

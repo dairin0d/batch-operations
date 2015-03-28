@@ -1541,10 +1541,12 @@ class BlUtil:
             if (not container) or (container.type != 'VIEW_3D'): container = context.scene
             return Vector(container.cursor_location)
         @staticmethod
-        def cursor_set(context, value):
+        def cursor_set(context, value, force=True):
             container = getattr(context, "space_data", None)
             if (not container) or (container.type != 'VIEW_3D'): container = context.scene
-            container.cursor_location = Vector(value)
+            cursor_location = Vector(value)
+            if force or (cursor_location != container.cursor_location):
+                container.cursor_location = cursor_location
         
         @staticmethod
         def bounding_box(scene, matrix=None, exclude=()):

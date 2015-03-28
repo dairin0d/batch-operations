@@ -21,6 +21,8 @@ import blf
 
 from mathutils import Color, Vector, Matrix, Quaternion, Euler
 
+from .bpy_inspect import BlRna
+from .utils_python import DummyObject
 from .utils_gl import cgl
 
 #============================================================================#
@@ -29,9 +31,9 @@ from .utils_gl import cgl
 # since Blender only shows the report from the currently executing operator.
 
 # ===== MESSAGEBOX ===== #
-if not hasattr(bpy.types, "INFO_OT_messagebox"):
-    class INFO_OT_messagebox(bpy.types.Operator):
-        bl_idname = "info.messagebox"
+if not hasattr(bpy.types, "WM_OT_messagebox"):
+    class WM_OT_messagebox(bpy.types.Operator):
+        bl_idname = "wm.messagebox"
         
         # "Attention!" is quite generic caption that suits
         # most of the situations when "OK" button is desirable.
@@ -88,7 +90,7 @@ if not hasattr(bpy.types, "INFO_OT_messagebox"):
                 col.label(text=line, icon=icon)
                 icon = 'NONE'
     
-    bpy.utils.register_class(INFO_OT_messagebox) # REGISTER
+    bpy.utils.register_class(WM_OT_messagebox) # REGISTER
 
 def messagebox(text, icon='NONE', width=300, confirm=False, spacing=0.5):
     """
@@ -104,13 +106,13 @@ def messagebox(text, icon='NONE', width=300, confirm=False, spacing=0.5):
     spacing -- relative distance between the lines
         Defaults to 0.5.
     """
-    INFO_OT_messagebox = bpy.types.INFO_OT_messagebox
-    INFO_OT_messagebox.args["text"] = text
-    INFO_OT_messagebox.args["icon"] = icon
-    INFO_OT_messagebox.args["width"] = width
-    INFO_OT_messagebox.args["spacing"] = spacing
-    INFO_OT_messagebox.args["confirm"] = confirm
-    bpy.ops.info.messagebox('INVOKE_DEFAULT')
+    WM_OT_messagebox = bpy.types.WM_OT_messagebox
+    WM_OT_messagebox.args["text"] = text
+    WM_OT_messagebox.args["icon"] = icon
+    WM_OT_messagebox.args["width"] = width
+    WM_OT_messagebox.args["spacing"] = spacing
+    WM_OT_messagebox.args["confirm"] = confirm
+    bpy.ops.wm.messagebox('INVOKE_DEFAULT')
 #============================================================================#
 
 # Note:
@@ -176,9 +178,7 @@ class NestedLayout:
         To avoid interference with other panels' foldable
         containers, supply panel's bl_idname as the idname.
         """
-        if isinstance(layout, cls):
-            if layout._idname == idname:
-                return layout
+        if isinstance(layout, cls) and (layout._idname == idname): return layout
         
         self = object.__new__(cls)
         self._idname = idname
@@ -188,9 +188,8 @@ class NestedLayout:
         self._attrs = dict(self._default_attrs)
         self._tag = None
         
-        if parent:
-            # propagate settings to sublayouts
-            self(**parent._stack[-1]._attrs)
+        # propagate settings to sublayouts
+        if parent: self(**parent._stack[-1]._attrs)
         
         return self
     
@@ -200,15 +199,13 @@ class NestedLayout:
             # This is the dummy layout; imitate normal layout
             # behavior without actually drawing anything.
             if name in self._sub_names:
-                return (lambda *args, **kwargs:
-                    NestedLayout(None, self._idname, self))
+                return (lambda *args, **kwargs: NestedLayout(None, self._idname, self))
             else:
                 return self._attrs.get(name, self._dummy_callable)
         
         if name in self._sub_names:
             func = getattr(layout, name)
-            return (lambda *args, **kwargs:
-                NestedLayout(func(*args, **kwargs), self._idname, self))
+            return (lambda *args, **kwargs: NestedLayout(func(*args, **kwargs), self._idname, self))
         else:
             return getattr(layout, name)
     
@@ -218,8 +215,7 @@ class NestedLayout:
         else:
             wrapper = self._stack[-1]
             wrapper._attrs[name] = value
-            if wrapper._layout:
-                setattr(wrapper._layout, name, value)
+            if wrapper._layout: setattr(wrapper._layout, name, value)
     
     def __call__(self, **kwargs):
         """Batch-set layout attributes."""
@@ -233,7 +229,8 @@ class NestedLayout:
     
     @staticmethod
     def _dummy_callable(*args, **kwargs):
-        pass
+        return NestedLayout._dummy_obj
+    _dummy_obj = DummyObject()
     
     # ===== FOLD (currently very hacky) ===== #
     # Each foldable micropanel needs to store its fold-status
@@ -306,6 +303,15 @@ class NestedLayout:
         
         return res
     
+    # ===== BUTTON (currently very hacky) ===== #
+    _button_registrator = None
+    def button(self, callback, *args, tooltip=None, **kwargs):
+        """Draw a dynamic button. Callback and tooltip are expected to be stable."""
+        registrator = self._button_registrator
+        op_idname = (registrator.get(callback, tooltip) if registrator else None)
+        if not op_idname: op_idname = "wm.dynamic_button_dummy"
+        return self.operator(op_idname, *args, **kwargs)
+    
     # ===== NESTED CONTEXT MANAGEMENT ===== #
     class ExitSublayout(Exception):
         def __init__(self, tag=None):
@@ -313,9 +319,7 @@ class NestedLayout:
     
     @classmethod
     def exit(cls, tag=None):
-        """
-        Jump out of current (or marked with the given tag) layout's context.
-        """
+        """Jump out of current (or marked with the given tag) layout's context."""
         raise cls.ExitSublayout(tag)
     
     def __getitem__(self, tag):
@@ -326,19 +330,144 @@ class NestedLayout:
     def __enter__(self):
         # Only nested (context-managed) layouts are stored in stack
         parent = self._parent
-        if parent:
-            parent._stack.append(self)
+        if parent: parent._stack.append(self)
     
     def __exit__(self, type, value, traceback):
         # Only nested (context-managed) layouts are stored in stack
         parent = self._parent
-        if parent:
-            parent._stack.pop()
+        if parent: parent._stack.pop()
         
         if type == self.ExitSublayout:
             # Is this the layout the exit() was requested for?
             # Yes: suppress the exception. No: let it propagate to the parent.
             return (value.tag is None) or (value.tag == self._tag)
+
+if not hasattr(bpy.types, "WM_OT_dynamic_button_dummy"):
+    class WM_OT_dynamic_button_dummy(bpy.types.Operator):
+        bl_idname = "wm.dynamic_button_dummy"
+        bl_label = " "
+        bl_description = ""
+        bl_options = {'INTERNAL'}
+        arg = bpy.props.StringProperty()
+        def execute(self, context):
+            return {'CANCELLED'}
+        def invoke(self, context, event):
+            return {'CANCELLED'}
+    bpy.utils.register_class(WM_OT_dynamic_button_dummy)
+
+class DynamicButton:
+    def __init__(self, id):
+        self.age = 0
+        self.id = id
+    
+    def register(self, btn_info):
+        data_path, callback, tooltip = btn_info
+        
+        if not callback:
+            def execute(self, context):
+                return {'CANCELLED'}
+            def invoke(self, context, event):
+                return {'CANCELLED'}
+        elif data_path:
+            full_path_resolve = BlRna.full_path_resolve
+            def execute(self, context):
+                _self = full_path_resolve(data_path)
+                return ({'CANCELLED'} if callback(_self, context, None, self.arg) is False else {'FINISHED'})
+            def invoke(self, context, event):
+                _self = full_path_resolve(data_path)
+                return ({'CANCELLED'} if callback(_self, context, event, self.arg) is False else {'FINISHED'})
+        else:
+            def execute(self, context):
+                return ({'CANCELLED'} if callback(context, None, self.arg) is False else {'FINISHED'})
+            def invoke(self, context, event):
+                return ({'CANCELLED'} if callback(context, event, self.arg) is False else {'FINISHED'})
+        
+        self.op_idname = "wm.dynamic_button_%s" % self.id
+        self.op_class = type("WM_OT_dynamic_button_%s" % self.id, (bpy.types.Operator,), dict(
+            bl_idname = self.op_idname,
+            bl_label = "",
+            bl_description = tooltip,
+            bl_options = {'INTERNAL'},
+            arg = bpy.props.StringProperty(),
+            execute = execute,
+            invoke = invoke,
+        ))
+        bpy.utils.register_class(self.op_class)
+    
+    def unregister(self):
+        bpy.utils.unregister_class(self.op_class)
+
+class ButtonRegistrator:
+    max_age = 2
+    
+    def __init__(self):
+        self.update_counter = 0
+        self.layout_counter = 0
+        self.free_ids = []
+        self.to_register = set()
+        self.to_unregister = set()
+        self.registered = {}
+    
+    def register_button(self, btn_info):
+        if self.free_ids:
+            btn_id = self.free_ids.pop()
+        else:
+            btn_id = len(self.registered)
+        
+        btn = DynamicButton(btn_id)
+        btn.register(btn_info)
+        
+        self.registered[btn_info] = btn
+    
+    def unregister_button(self, btn_info):
+        btn = self.registered.pop(btn_info)
+        self.free_ids.append(btn.id)
+        btn.unregister()
+    
+    def update(self):
+        if self.to_unregister:
+            for btn_info in self.to_unregister:
+                self.unregister_button(btn_info)
+            self.to_unregister.clear()
+        
+        if self.to_register:
+            for btn_info in self.to_register:
+                self.register_button(btn_info)
+            self.to_register.clear()
+        
+        self.update_counter += 1
+    
+    def increment_age(self):
+        for btn_info, btn in self.registered.items():
+            btn.age += 1
+            if btn.age > self.max_age:
+                self.to_unregister.add(btn_info)
+    
+    def get(self, callback, tooltip):
+        if self.layout_counter != self.update_counter:
+            self.layout_counter = self.update_counter
+            self.increment_age()
+        
+        if not callback:
+            if not tooltip: return None
+            btn_info = (None, None, tooltip)
+        else:
+            if tooltip is None: tooltip = callback.__doc__
+            
+            callback_self = getattr(callback, "__self__", None)
+            if isinstance(callback_self, bpy.types.PropertyGroup):
+                # we cannot keep reference to this object, only the data path
+                full_path = BlRna.full_path(callback_self)
+                btn_info = (full_path, callback.__func__, tooltip)
+            else:
+                btn_info = (None, callback, tooltip)
+        
+        btn = self.registered.get(btn_info)
+        if btn:
+            btn.age = 0
+            return btn.op_idname
+        
+        self.to_register.add(btn_info)
 
 #============================================================================#
 
