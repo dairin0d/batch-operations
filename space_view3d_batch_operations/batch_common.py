@@ -188,6 +188,47 @@ def apply_modifiers(objects, scene, idnames, options=(), apply_as='DATA'):
     
     return objects_to_delete
 
+def add_potential_duplis(objs, parent):
+    if parent.dupli_type == 'GROUP':
+        if not parent.dupli_group: return
+        for obj in parent.dupli_group.objects:
+            objs.add(obj)
+            add_potential_duplis(objs, obj)
+    elif parent.dupli_type in {'VERTS', 'FACES'}:
+        for obj in parent.children:
+            objs.add(obj)
+            add_potential_duplis(objs, obj)
+
+# GROUP: layers don't matter, hide status is correct
+# VERTS/FACES: objects on invisible layers don't get
+#   included into dupli_list, hide status is False
+#   even if the object is hidden (a bug?)
+def add_actual_duplis(objs, obj, context, ignore_hide):
+    if obj.dupli_list: obj.dupli_list_clear()
+    obj.dupli_list_create(context.scene, 'VIEWPORT')
+    for dupli in obj.dupli_list:
+        if ignore_hide or (not dupli.object.hide):
+            objs.add(dupli.object)
+    obj.dupli_list_clear()
+
+def iterate_workset(search_in, context=None, obj_types=None, include_duplis=None):
+    if include_duplis is None: include_duplis = addon.preferences.include_duplis
+    if (not include_duplis) or (search_in == 'FILE'):
+        yield from BlUtil.Object.iterate(search_in, context, obj_types)
+    else:
+        if context is None: context = bpy.context
+        objs = set()
+        for obj in BlUtil.Object.iterate(search_in, context, None):
+            if ((obj_types is None) or (obj.type in obj_types)): objs.add(obj)
+            if obj.dupli_type in {'NONE', 'FRAMES'}: continue
+            if search_in == 'VISIBLE':
+                add_actual_duplis(objs, obj, context, False)
+            elif search_in == 'LAYER':
+                add_actual_duplis(objs, obj, context, True)
+            else:
+                add_potential_duplis(objs, obj)
+        yield from objs
+
 #============================================================================#
 
 @addon.Operator(idname="object.batch_repeat_actions", options={'INTERNAL'}, label="Repeat action(s)", description="Repeat action(s) for selected objects")
