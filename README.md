@@ -1,5 +1,5 @@
-# batch-operations
-Batch operations for specific cases (addon for Blender 2.79)
+# Batch Operations
+Batch Operations for specific cases (addon for Blender 2.79)
 
 Wiki: http://wiki.blender.org/index.php/Extensions:2.6/Py/Scripts/3D_interaction/BatchOperations
 
